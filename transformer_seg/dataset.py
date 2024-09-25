@@ -287,12 +287,12 @@ class BaselineSegmentationDataset(Dataset):
         logger.debug(f'Attempting to load {item["im"]}')
         im, page_data = item['im'], item['lines']
         im = Image.open(io.BytesIO(im))
-        im = self.transforms(im)['pixel_values'][0]
+        im = torch.tensor(self.transforms(im)['pixel_values'][0])
 
         if self.aug:
             im = im.permute((1, 2, 0)).numpy()
             o = self.aug(image=im)
-            im = torch.tensor(o['image'].transpose(2, 0, 1))
+            im = torch.from_numpy(o['image'].transpose(2, 0, 1))
 
         lines = (torch.tensor([x['curve'] for x in page_data]) * self.curve_resolution).to(torch.long)
         # offset behind sos/eos/pad token indices
