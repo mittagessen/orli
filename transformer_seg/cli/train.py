@@ -163,7 +163,6 @@ def train(ctx, load, batch_size, output, freq, quit, epochs,
 
     hyper_params = SEGMENTATION_HYPER_PARAMS.copy()
     hyper_params.update({'freq': freq,
-                         'height': max_side_length,
                          'batch_size': batch_size,
                          'quit': quit,
                          'epochs': epochs,
