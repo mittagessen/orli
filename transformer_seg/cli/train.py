@@ -133,7 +133,7 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               default=SEGMENTATION_HYPER_PARAMS['accumulate_grad_batches'],
               help='Number of batches to accumulate gradient across.')
 @click.argument('ground_truth', nargs=-1, callback=_expand_gt, type=click.Path(exists=False, dir_okay=False))
-def train(ctx, load, batch_size, max_side_length, output, freq, quit, epochs,
+def train(ctx, load, batch_size, output, freq, quit, epochs,
           min_epochs, lag, min_delta, optimizer, lrate, momentum, weight_decay,
           gradient_clip_val, warmup, schedule, gamma, step_size,
           sched_patience, cos_max, cos_min_lr, training_files,
