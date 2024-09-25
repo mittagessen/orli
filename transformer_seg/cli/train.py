@@ -28,7 +28,7 @@ from transformer_seg.default_specs import SEGMENTATION_HYPER_PARAMS
 from .util import _expand_gt, _validate_manifests, message, to_ptl_device
 
 logging.captureWarnings(True)
-logger = logging.getLogger('party')
+logger = logging.getLogger('transformer_seg')
 
 # suppress worker seeding message
 logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
