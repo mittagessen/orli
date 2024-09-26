@@ -17,25 +17,16 @@ Utility functions for data loading and training of VGSL networks.
 """
 import io
 import torch
-import numpy as np
 import lightning.pytorch as L
 
-import tempfile
 import pyarrow as pa
 
 from typing import (TYPE_CHECKING, Callable, List, Literal, Optional, Union,
                     Sequence)
 
-from functools import partial
 from torch.utils.data import Dataset, DataLoader
 
 from PIL import Image
-
-from scipy.special import comb
-from shapely.geometry import LineString
-
-from kraken.lib import functional_im_transforms as F_t
-from kraken.lib.xml import XMLPage
 
 from torch.utils.data import default_collate
 from torch.nn.utils.rnn import pad_sequence
@@ -60,110 +51,6 @@ def collate_curves(batch):
             'target': pad_sequence([item['target'] for item in batch], batch_first=True, padding_value=-100)}
 
 
-def _to_curve(baseline, im_size, min_points: int = 8) -> torch.Tensor:
-    """
-    Converts poly(base)lines to Bezier curves and normalizes them.
-    """
-    baseline = np.array(baseline)
-    if len(baseline) < min_points:
-        ls = LineString(baseline)
-        baseline = np.stack([np.array(ls.interpolate(x, normalized=True).coords)[0] for x in np.linspace(0, 1, 8)])
-    # control points normalized to patch extents
-    curve = np.concatenate(([baseline[0]], bezier_fit(baseline), [baseline[-1]]))/im_size
-    curve = curve.flatten()
-    return pa.scalar(curve, type=pa.list_(pa.float32()))
-
-
-def compile(files: Optional[List[Union[str, 'PathLike']]] = None,
-            output_file: Union[str, 'PathLike'] = None,
-            max_side_length: int = 4000,
-            reorder: Union[bool, Literal['L', 'R']] = True,
-            normalize_whitespace: bool = True,
-            normalization: Optional[Literal['NFD', 'NFC', 'NFKD', 'NFKC']] = None,
-            callback: Callable[[int, int], None] = lambda chunk, lines: None) -> None:
-    """
-    Compiles a collection of XML facsimile files into a binary arrow dataset.
-
-    Args:
-        files: List of XML files
-        output_file: destination to write arrow file to
-        max_side_length: Max length of longest image side.
-        reorder: text reordering
-        normalize_whitespace: whether to normalize all whitespace to ' '
-        normalization: Unicode normalization to apply to data.
-        callback: progress callback
-    """
-    text_transforms: List[Callable[[str], str]] = []
-
-    # pyarrow structs
-    line_struct = pa.struct([('text', pa.list_(pa.int32())), ('curve', pa.list_(pa.float32()))])
-    page_struct = pa.struct([('im', pa.binary()), ('lines', pa.list_(line_struct))])
-
-    codec = ByT5Codec()
-
-    if normalization:
-        text_transforms.append(partial(F_t.text_normalize, normalization=normalization))
-    if normalize_whitespace:
-        text_transforms.append(F_t.text_whitespace_normalize)
-        if reorder:
-            if reorder in ('L', 'R'):
-                text_transforms.append(partial(F_t.text_reorder, base_dir=reorder))
-            else:
-                text_transforms.append(F_t.text_reorder)
-
-    num_lines = 0
-
-    schema = pa.schema([('pages', page_struct)])
-
-    callback(0, len(files))
-
-    with tempfile.NamedTemporaryFile() as tmpfile:
-        with pa.OSFile(tmpfile.name, 'wb') as sink:
-            with pa.ipc.new_file(sink, schema) as writer:
-                for file in files:
-                    try:
-                        page = XMLPage(file).to_container()
-                        im = Image.open(page.imagename)
-                        im_size = im.size
-                    except Exception:
-                        continue
-                    page_data = []
-                    for line in page.lines:
-                        try:
-                            text = line.text
-                            for func in text_transforms:
-                                text = func(text)
-                            if not text:
-                                logger.info(f'Text line "{line.text}" is empty after transformations')
-                                continue
-                            if not line.baseline:
-                                logger.info('No baseline given for line')
-                                continue
-                            page_data.append(pa.scalar({'text': pa.scalar(codec.encode(text).numpy()),
-                                                        'curve': _to_curve(line.baseline, im_size)},
-                                                       line_struct))
-                            num_lines += 1
-                        except Exception:
-                            continue
-                    if len(page_data) > 1:
-                        # scale image only now
-                        im = optional_resize(im, max_side_length).convert('RGB')
-                        fp = io.BytesIO()
-                        im.save(fp, format='png')
-                        ar = pa.array([pa.scalar({'im': fp.getvalue(), 'lines': page_data}, page_struct)], page_struct)
-                        writer.write(pa.RecordBatch.from_arrays([ar], schema=schema))
-                    callback(1, len(files))
-        with pa.memory_map(tmpfile.name, 'rb') as source:
-            metadata = {'num_lines': num_lines.to_bytes(4, 'little')}
-            schema = schema.with_metadata(metadata)
-            ds_table = pa.ipc.open_file(source).read_all()
-            new_table = ds_table.replace_schema_metadata(metadata)
-            with pa.OSFile(output_file, 'wb') as sink:
-                with pa.ipc.new_file(sink, schema=schema) as writer:
-                    for batch in new_table.to_batches():
-                        writer.write(batch)
-
-
 def _validation_worker_init_fn(worker_id):
     """ Fix random seeds so that augmentation always produces the same
         results when validating. Temporarily increase the logging level
@@ -171,29 +58,6 @@ def _validation_worker_init_fn(worker_id):
         at info level about the seed being changed. """
     from lightning.pytorch import seed_everything
     seed_everything(42)
-
-
-def optional_resize(img: 'Image.Image', max_size: int):
-    """
-    Resizing that return images with the longest side below `max_size`
-    unchanged.
-
-    Args:
-        img: image to resize
-        max_size: maximum length of any side of the image
-    """
-    w, h = img.size
-    img_max = max(w, h)
-    if img_max > max_size:
-        if w > h:
-            h = int(h * max_size/w)
-            w = max_size
-        else:
-            w = int(w * max_size/h)
-            h = max_size
-        return img.resize((w, h))
-    else:
-        return img
 
 
 class LineSegmentationDataModule(L.LightningDataModule):
@@ -298,34 +162,8 @@ class BaselineSegmentationDataset(Dataset):
         # offset behind sos/eos/pad token indices
         lines += 3
         # append eos token
-        lines = torch.cat([lines, torch.full((1, 8), self.eos_token_id)])
+        lines = torch.clamp(torch.cat([lines, torch.full((1, 8), self.eos_token_id)]), min=0, max=self.curve_resolution+3)
         return {'image': im, 'target': lines}
 
     def __len__(self) -> int:
         return len(self.arrow_table)
-
-
-# magic lsq cubic bezier fit function from the internet.
-def Mtk(n, t, k):
-    return t**k * (1-t)**(n-k) * comb(n, k)
-
-
-def BezierCoeff(ts):
-    return [[Mtk(3, t, k) for k in range(4)] for t in ts]
-
-
-def bezier_fit(bl):
-    x = bl[:, 0]
-    y = bl[:, 1]
-    dy = y[1:] - y[:-1]
-    dx = x[1:] - x[:-1]
-    dt = (dx ** 2 + dy ** 2)**0.5
-    t = dt/dt.sum()
-    t = np.hstack(([0], t))
-    t = t.cumsum()
-
-    Pseudoinverse = np.linalg.pinv(BezierCoeff(t))  # (9,4) -> (4,9)
-
-    control_points = Pseudoinverse.dot(bl)  # (4,9)*(9,2) -> (4,2)
-    medi_ctp = control_points[1:-1, :]
-    return medi_ctp
