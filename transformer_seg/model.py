@@ -69,16 +69,17 @@ class SegmentationModel(L.LightningModule):
         # We compute the embeddings manually as transformers flattens all but
         # the last dimension of the input_ids. We can't tie weights as the
         # EmbeddingBag is not reversible.
-        # The number of embeddings is curve_resolution + sos/eos/pad.
-        self.token_embeddings = MBartScaledCurveEmbedding(curve_resolution + 3,
+        # The number of embeddings is curve_resolution + sos/eos/pad + 1.
+        embed_dim = curve_resolution + 4
+        self.token_embeddings = MBartScaledCurveEmbedding(embed_dim,
                                                           self.nn.config.decoder.d_model,
                                                           padding_idx=self.nn.config.decoder.pad_token_id,
                                                           embed_scale=math.sqrt(self.nn.config.decoder.d_model))
         self.nn.decoder.model.decoder.embed_tokens = self.token_embeddings
         # project the hidden state to 8 * curve_resolution + 3 so we can afterwards do a view (N, S, 8, curve_resolution + 3)
-        self.nn.decoder.set_output_embeddings(nn.Linear(self.nn.config.decoder.d_model, (curve_resolution + 3) * 8, bias=False))
+        self.nn.decoder.set_output_embeddings(nn.Linear(self.nn.config.decoder.d_model, embed_dim * 8, bias=False))
 
-        self.nn.config.decoder.vocab_size = curve_resolution + 3
+        self.nn.config.decoder.vocab_size = embed_dim
         self.nn.config.decoder_start_token_id = self.nn.config.decoder.bos_token_id
         self.nn.config.eos_token_id = self.nn.config.decoder.eos_token_id
         self.nn.config.pad_token_id = self.nn.config.decoder.pad_token_id
