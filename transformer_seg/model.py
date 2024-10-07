@@ -28,7 +28,7 @@ from torch.optim import lr_scheduler
 from torchmetrics.aggregation import MeanMetric
 
 from transformer_seg.embedding import MBartScaledCurveEmbedding
-from transformers import VisionEncoderDecoderModel
+from transformers import VisionEncoderDecoderModel, DonutSwinModel, MBartForCausalLM
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +64,10 @@ class SegmentationModel(L.LightningModule):
         self.save_hyperparameters()
 
         logger.info('Creating segmentation model')
+        encoder = DonutSwinModel.from_pretrained('mittagessen/transformer_seg_encoder')
+        decoder = MBartForCausalLM.from_pretrained('mittagessen/transformer_seg_decoder')
 
-        self.nn = VisionEncoderDecoderModel.from_pretrained("naver-clova-ix/donut-base-finetuned-cord-v2")
+        self.nn  = VisionEncoderDecoderModel(encoder=encoder, decoder=decoder)
         # We compute the embeddings manually as transformers flattens all but
         # the last dimension of the input_ids. We can't tie weights as the
         # EmbeddingBag is not reversible.
