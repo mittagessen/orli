@@ -154,7 +154,7 @@ class BaselineSegmentationDataset(Dataset):
         item = self.arrow_table.column('pages')[index].as_py()
         logger.debug(f'Attempting to load {item["im"]}')
         im, page_data = item['im'], item['lines']
-        im = Image.open(io.BytesIO(im))
+        im = Image.open(io.BytesIO(im)).convert('RGB')
         im = torch.tensor(self.transforms(im)['pixel_values'][0])
 
         if self.aug:
