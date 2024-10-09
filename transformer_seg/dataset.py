@@ -48,7 +48,7 @@ def collate_curves(batch, max_lines_in_page: int):
     Concatenates and pads curves.
     """
     return {'image': default_collate([item['image'] for item in batch]),
-            'target': torch.stack([F.pad(x['target'], pad=(0, max_lines_in_page-len(x['target'])), value=-100) for x in batch])}
+            'target': torch.stack([F.pad(x['target'], pad=(0, 0, 0, max_lines_in_page-len(x['target'])), value=-100) for x in batch])}
 
 
 def _validation_worker_init_fn(worker_id):
