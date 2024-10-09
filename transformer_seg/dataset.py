@@ -132,7 +132,11 @@ class BaselineSegmentationDataset(Dataset):
 
         for file in files:
             with pa.memory_map(file, 'rb') as source:
-                ds_table = pa.ipc.open_file(source).read_all()
+                try:
+                    ds_table = pa.ipc.open_file(source).read_all()
+                except Exception:
+                    logger.warning(f'{file} is not an arrow file')
+                    continue
                 raw_metadata = ds_table.schema.metadata
                 if not raw_metadata or b'num_lines' not in raw_metadata:
                     raise ValueError(f'{file} does not contain a valid metadata record.')
