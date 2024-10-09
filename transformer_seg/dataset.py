@@ -17,19 +17,19 @@ Utility functions for data loading and training of VGSL networks.
 """
 import io
 import torch
+import torch.nn.functional as F
 import lightning.pytorch as L
 
 import pyarrow as pa
 
-from typing import (TYPE_CHECKING, Callable, List, Literal, Optional, Union,
-                    Sequence)
+from functools import partial
+from typing import TYPE_CHECKING, Union, Sequence
 
 from torch.utils.data import Dataset, DataLoader
 
 from PIL import Image
 
 from torch.utils.data import default_collate
-from torch.nn.utils.rnn import pad_sequence
 
 from transformers import DonutImageProcessor
 
@@ -43,12 +43,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def collate_curves(batch):
+def collate_curves(batch, max_lines_in_page: int):
     """
     Concatenates and pads curves.
     """
     return {'image': default_collate([item['image'] for item in batch]),
-            'target': pad_sequence([item['target'] for item in batch], batch_first=True, padding_value=-100)}
+            'target': torch.stack([F.pad(x['target'], pad=(0, max_lines_in_page-len(x['target'])), value=-100) for x in batch])}
 
 
 def _validation_worker_init_fn(worker_id):
@@ -88,6 +88,9 @@ class LineSegmentationDataModule(L.LightningDataModule):
                                                    eos_token_id=self.hparams.eos_token_id,
                                                    curve_resolution=self.hparams.curve_resolution,
                                                    augmentation=False)
+        self.collator = partial(collate_curves,
+                                max_lines_in_page=max(self.train_set.max_lines_in_page,
+                                                      self.val_set.max_lines_in_page))
 
     def train_dataloader(self):
         return DataLoader(self.train_set,
@@ -95,7 +98,7 @@ class LineSegmentationDataModule(L.LightningDataModule):
                           num_workers=self.hparams.num_workers,
                           pin_memory=True,
                           shuffle=True,
-                          collate_fn=collate_curves)
+                          collate_fn=self.collator)
 
     def val_dataloader(self):
         return DataLoader(self.val_set,
@@ -104,7 +107,7 @@ class LineSegmentationDataModule(L.LightningDataModule):
                           num_workers=self.hparams.num_workers,
                           pin_memory=True,
                           worker_init_fn=_validation_worker_init_fn,
-                          collate_fn=collate_curves)
+                          collate_fn=self.collator)
 
 
 class BaselineSegmentationDataset(Dataset):
@@ -129,6 +132,7 @@ class BaselineSegmentationDataset(Dataset):
         self.arrow_table = None
         self.curve_resolution = curve_resolution
         self.eos_token_id = eos_token_id
+        self.max_lines_in_page = 0
 
         for file in files:
             with pa.memory_map(file, 'rb') as source:
@@ -138,8 +142,9 @@ class BaselineSegmentationDataset(Dataset):
                     logger.warning(f'{file} is not an arrow file')
                     continue
                 raw_metadata = ds_table.schema.metadata
-                if not raw_metadata or b'num_lines' not in raw_metadata:
+                if not raw_metadata or b'max_lines_in_page' not in raw_metadata:
                     raise ValueError(f'{file} does not contain a valid metadata record.')
+                self.max_lines_in_page = max(int.from_bytes(raw_metadata[b'max_lines_in_page'], 'little'), self.max_lines_in_page)
                 if not self.arrow_table:
                     self.arrow_table = ds_table
                 else:
