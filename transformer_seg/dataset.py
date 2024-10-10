@@ -42,6 +42,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+Image.MAX_IMAGE_PIXELS = 20000 ** 2
 
 def collate_curves(batch, max_lines_in_page: int):
     """
