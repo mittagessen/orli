@@ -89,8 +89,9 @@ class LineSegmentationDataModule(L.LightningDataModule):
                                                    im_transforms=self.im_transforms,
                                                    augmentation=False)
         self.collator = partial(collate_curves,
-                                max_lines_in_page=max(self.train_set.max_lines_in_page,
-                                                      self.val_set.max_lines_in_page),
+                                max_lines_in_page=min(max(self.train_set.max_lines_in_page,
+                                                          self.val_set.max_lines_in_page),
+                                                      self.train_set.max_pos_embeddings),
                                 pad_token_id=0)
 
     def train_dataloader(self):
