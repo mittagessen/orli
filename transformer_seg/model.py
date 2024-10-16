@@ -109,9 +109,10 @@ class SegmentationModel(L.LightningModule):
         return loss
 
     def on_validation_epoch_end(self):
-        self.log('val_metric', self.val_mean.compute(), on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        if not trainer.sanity_checking:
+            self.log('val_metric', self.val_mean.compute(), on_step=False, on_epoch=True, prog_bar=True, logger=True)
+            self.log('global_step', self.global_step, on_step=False, on_epoch=True, prog_bar=False, logger=True)
         self.val_mean.reset()
-        self.log('global_step', self.global_step, on_step=False, on_epoch=True, prog_bar=False, logger=True)
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         """
