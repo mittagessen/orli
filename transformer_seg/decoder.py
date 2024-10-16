@@ -67,7 +67,7 @@ class MBartForCurveRegression(MBartPreTrainedModel, GenerationMixin):
         """
         shifted_input_curves = input_curves.new_zeros(input_curves.shape)
         shifted_input_curves[..., 1:, :] = input_curves[..., :-1, :].clone()
-        shifted_input_curves[..., 0, :] = self.config.pad_token_id
+        shifted_input_curves[..., 0, :] = 0
         return shifted_input_curves
 
     def forward(self,
