@@ -63,9 +63,10 @@ class SegmentationModel(L.LightningModule):
         self.save_hyperparameters()
 
         logger.info('Creating segmentation model')
-        self.encoder = DonutSwinModel.from_pretrained('mittagessen/transformer_seg_encoder')
-        self.decoder = MBartForCurveRegression.from_pretrained('mittagessen/reg_transformer_seg_decoder')
+        self.model = nn.ModuleDict({'encoder': DonutSwinModel.from_pretrained('mittagessen/transformer_seg_encoder'),
+                                    'decoder': MBartForCurveRegression.from_pretrained('mittagessen/reg_transformer_seg_decoder')}
 
+        self.model = torch.compile(self.model)
         self.nn.config.pad_token_id = self.nn.config.decoder.pad_token_id
 
         self.nn.train()
@@ -80,9 +81,9 @@ class SegmentationModel(L.LightningModule):
     def _step(self, batch):
         try:
             # s is max_line_len+1 to make space for first cls, curve tuple.
-            hidden_state = self.encoder(pixel_values=batch['image']).last_hidden_state
+            hidden_state = self.model['encoder'](pixel_values=batch['image']).last_hidden_state
             # decoder shifts targets internally to right
-            output = self.decoder(labels=batch['target'], encoder_hidden_states=hidden_state)
+            output = self.model['decoder'](labels=batch['target'], encoder_hidden_states=hidden_state)
             # split up objectness scores and curve regressions as we only
             # compute the regression loss on the non-padded part of the lines.
             class_target = batch['target'][..., 0]

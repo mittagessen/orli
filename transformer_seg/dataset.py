@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 import lightning.pytorch as L
 
+import numpy as np
 import pyarrow as pa
 
 from functools import partial
@@ -155,7 +156,12 @@ class BaselineSegmentationDataset(Dataset):
         item = self.arrow_table.column('pages')[index].as_py()
         logger.debug(f'Attempting to load {item["im"]}')
         im, page_data = item['im'], item['lines']
-        im = Image.open(io.BytesIO(im)).convert('RGB')
+        try:
+            im = Image.open(io.BytesIO(im)).convert('RGB')
+        except Exception:
+            rng = np.random.default_rng()
+            idx = rng.integers(0, len(self))
+            return self[idx]
         im = torch.tensor(self.transforms(im)['pixel_values'][0])
 
         if self.aug:
