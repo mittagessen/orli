@@ -185,7 +185,6 @@ class MBartForCurveRegression(MBartPreTrainedModel, GenerationMixin):
             return_dict=return_dict,
         )
 
-        print(outputs[0].shape)
         logits = self.head(outputs[0])
 
         return CausalLMOutputWithCrossAttentions(loss=None,
