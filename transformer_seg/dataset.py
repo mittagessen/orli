@@ -128,7 +128,7 @@ class BaselineSegmentationDataset(Dataset):
                  files: Sequence[Union[str, 'PathLike']],
                  im_transforms=None,
                  augmentation: bool = False,
-                 max_pos_embeddings: int = 768) -> None:
+                 max_pos_embeddings: int = 767) -> None:
         self.files = files
         self.transforms = im_transforms
         self.aug = None
@@ -162,7 +162,7 @@ class BaselineSegmentationDataset(Dataset):
         logger.debug(f'Attempting to load {item["im"]}')
         im, page_data = item['im'], item['lines']
         # skip pages with more than max_pos_embeddings lines
-        if len(page_data) >= self.max_pos_embeddings:
+        if len(page_data) > self.max_pos_embeddings:
             rng = np.random.default_rng()
             idx = rng.integers(0, len(self))
             return self[idx]
