@@ -134,7 +134,7 @@ class MBartForCurveRegression(MBartPreTrainedModel, GenerationMixin):
                 - 1 for tokens that are **not masked**,
                 - 0 for tokens that are **masked**.
             output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+                iWhether or not to return the attentions tensors of all attention layers. See `attentions` under
                 returned tensors for more detail.
             output_hidden_states (`bool`, *optional*):
                 Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
@@ -169,9 +169,14 @@ class MBartForCurveRegression(MBartPreTrainedModel, GenerationMixin):
         if input_ids is None and inputs_embeds is None:
             input_ids = self._shift_right(labels)
 
+        # compute inputs_embeds here is our (B, S, 9)-shaped input_ids confuse
+        # the internal decoder logic.
+        if inputs_embeds is None:
+            inputs_embeds = self.model.decoder.embed_tokens(input_ids)
+
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model.decoder(
-            input_ids=input_ids,
+            input_ids=None,
             attention_mask=attention_mask,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
