@@ -215,7 +215,7 @@ def train(ctx, load, batch_size, output, freq, quit, epochs,
     checkpoint_callback = ModelCheckpoint(dirpath=output,
                                           save_top_k=10,
                                           monitor='global_step',
-                                          mode='max',
+                                          mode='min',
                                           auto_insert_metric_name=False,
                                           filename='checkpoint_{epoch:02d}-{val_metric:.4f}')
 
