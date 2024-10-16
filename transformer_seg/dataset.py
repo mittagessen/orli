@@ -162,7 +162,7 @@ class BaselineSegmentationDataset(Dataset):
         logger.debug(f'Attempting to load {item["im"]}')
         im, page_data = item['im'], item['lines']
         # skip pages with more than max_pos_embeddings lines
-        if len(page_data) > self.max_pos_embeddings:
+        if len(page_data) >= self.max_pos_embeddings:
             rng = np.random.default_rng()
             idx = rng.integers(0, len(self))
             return self[idx]
