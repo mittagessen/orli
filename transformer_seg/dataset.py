@@ -120,16 +120,20 @@ class BaselineSegmentationDataset(Dataset):
         im_transforms: Function taking an PIL.Image and returning a tensor
                        suitable for forward passes.
         augmentation: Enables augmentation.
+        max_pos_embeddings: Maximum number of lines to return from dataset.
+                            Pages with more lines will be skipped.
     """
     def __init__(self,
                  files: Sequence[Union[str, 'PathLike']],
                  im_transforms=None,
-                 augmentation: bool = False) -> None:
+                 augmentation: bool = False,
+                 max_pos_embeddings: int = 768) -> None:
         self.files = files
         self.transforms = im_transforms
         self.aug = None
         self.arrow_table = None
         self.max_lines_in_page = 0
+        self.max_pos_embeddings = max_pos_embeddings
 
         for file in files:
             with pa.memory_map(file, 'rb') as source:
@@ -156,6 +160,12 @@ class BaselineSegmentationDataset(Dataset):
         item = self.arrow_table.column('pages')[index].as_py()
         logger.debug(f'Attempting to load {item["im"]}')
         im, page_data = item['im'], item['lines']
+        # skip pages with more than max_pos_embeddings lines
+        if len(page_data) > self.max_pos_embeddings:
+            rng = np.random.default_rng()
+            idx = rng.integers(0, len(self))
+            return self[idx]
+
         try:
             im = Image.open(io.BytesIO(im)).convert('RGB')
         except Exception:
