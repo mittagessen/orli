@@ -67,16 +67,12 @@ class SegmentationModel(L.LightningModule):
                                     'decoder': MBartForCurveRegression.from_pretrained('mittagessen/reg_transformer_seg_decoder')})
 
         self.model = torch.compile(self.model)
-        self.nn.config.pad_token_id = self.nn.config.decoder.pad_token_id
-
-        self.nn.train()
-
-        self.criterion = nn.CrossEntropyLoss()
+        self.model.train()
 
         self.val_mean = MeanMetric()
 
     def forward(self, x):
-        return self.nn(pixel_values=x)
+        return self.model(pixel_values=x)
 
     def _step(self, batch):
         try:
