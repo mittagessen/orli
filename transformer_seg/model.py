@@ -64,7 +64,7 @@ class SegmentationModel(L.LightningModule):
 
         logger.info('Creating segmentation model')
         self.model = nn.ModuleDict({'encoder': DonutSwinModel.from_pretrained('mittagessen/transformer_seg_encoder'),
-                                    'decoder': MBartForCurveRegression.from_pretrained('mittagessen/reg_transformer_seg_decoder')}
+                                    'decoder': MBartForCurveRegression.from_pretrained('mittagessen/reg_transformer_seg_decoder')})
 
         self.model = torch.compile(self.model)
         self.nn.config.pad_token_id = self.nn.config.decoder.pad_token_id
