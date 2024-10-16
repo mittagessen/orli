@@ -65,7 +65,7 @@ class SegmentationModel(L.LightningModule):
         logger.info('Creating segmentation model')
         self.model = nn.ModuleDict({'encoder': DonutSwinModel.from_pretrained('mittagessen/transformer_seg_encoder'),
                                     'decoder': MBartForCurveRegression.from_pretrained('mittagessen/reg_transformer_seg_decoder')})
-        self.model = torch.compile(self.model)
+        self.model = torch.compile(self.model, mode="reduce-overhead", fullgraph=True)
         self.model.train()
 
         self.val_mean = MeanMetric()
