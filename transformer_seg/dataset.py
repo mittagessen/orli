@@ -44,12 +44,15 @@ logger = logging.getLogger(__name__)
 
 Image.MAX_IMAGE_PIXELS = 20000 ** 2
 
-def collate_curves(batch, max_lines_in_page: int):
+
+def collate_curves(batch,
+                   max_lines_in_page: int,
+                   pad_token_id: int = 0):
     """
     Concatenates and pads curves.
     """
     return {'image': default_collate([item['image'] for item in batch]),
-            'target': torch.stack([F.pad(x['target'], pad=(0, 0, 0, max_lines_in_page-len(x['target'])), value=-100) for x in batch])}
+            'target': torch.stack([F.pad(x['target'], pad=(0, 0, 0, max_lines_in_page-len(x['target'])+1), value=pad_token_id) for x in batch])}
 
 
 def _validation_worker_init_fn(worker_id):
@@ -65,8 +68,6 @@ class LineSegmentationDataModule(L.LightningDataModule):
     def __init__(self,
                  training_data: Union[str, 'PathLike'],
                  evaluation_data: Union[str, 'PathLike'],
-                 curve_resolution: int = 1000,
-                 eos_token_id: int = 2,
                  augmentation: bool = False,
                  batch_size: int = 1,
                  num_workers: int = 8):
@@ -81,17 +82,15 @@ class LineSegmentationDataModule(L.LightningDataModule):
         """
         self.train_set = BaselineSegmentationDataset(self.hparams.training_data,
                                                      im_transforms=self.im_transforms,
-                                                     augmentation=self.hparams.augmentation,
-                                                     eos_token_id=self.hparams.eos_token_id,
-                                                     curve_resolution=self.hparams.curve_resolution)
+                                                     augmentation=self.hparams.augmentation)
+
         self.val_set = BaselineSegmentationDataset(self.hparams.evaluation_data,
                                                    im_transforms=self.im_transforms,
-                                                   eos_token_id=self.hparams.eos_token_id,
-                                                   curve_resolution=self.hparams.curve_resolution,
                                                    augmentation=False)
         self.collator = partial(collate_curves,
                                 max_lines_in_page=max(self.train_set.max_lines_in_page,
-                                                      self.val_set.max_lines_in_page))
+                                                      self.val_set.max_lines_in_page),
+                                pad_token_id=0)
 
     def train_dataloader(self):
         return DataLoader(self.train_set,
@@ -124,15 +123,11 @@ class BaselineSegmentationDataset(Dataset):
     def __init__(self,
                  files: Sequence[Union[str, 'PathLike']],
                  im_transforms=None,
-                 augmentation: bool = False,
-                 curve_resolution: int = 1000,
-                 eos_token_id: int = 2) -> None:
+                 augmentation: bool = False) -> None:
         self.files = files
         self.transforms = im_transforms
         self.aug = None
         self.arrow_table = None
-        self.curve_resolution = curve_resolution
-        self.eos_token_id = eos_token_id
         self.max_lines_in_page = 0
 
         for file in files:
@@ -168,11 +163,9 @@ class BaselineSegmentationDataset(Dataset):
             o = self.aug(image=im)
             im = torch.from_numpy(o['image'].transpose(2, 0, 1))
 
-        lines = (torch.tensor([x['curve'] for x in page_data]) * self.curve_resolution).to(torch.long)
-        # offset behind sos/eos/pad token indices
-        lines += 3
-        # append eos token
-        lines = torch.clamp(torch.cat([lines, torch.full((1, 8), self.eos_token_id)]), min=0, max=self.curve_resolution+3)
+        lines = torch.tensor([x['curve'] for x in page_data])
+        # concatenate line class in front of line
+        lines = torch.cat([torch.ones(lines.shape[0], 1), lines], dim=-1)
         return {'image': im, 'target': lines}
 
     def __len__(self) -> int:
