@@ -53,7 +53,8 @@ def collate_curves(batch,
     Concatenates and pads curves.
     """
     return {'image': default_collate([item['image'] for item in batch]),
-            'target': torch.stack([F.pad(x['target'], pad=(0, 0, 0, max_lines_in_page-len(x['target'])+1), value=pad_token_id) for x in batch])}
+            'target': torch.stack([F.pad(x['target'], pad=(0, 0, 0, max_lines_in_page-len(x['target'])), value=pad_token_id) for x in batch]),
+            'target_mask': torch.stack([F.pad(x['target_mask'], pad=(0, 0, 0, max_lines_in_page-len(x['target_mask'])), value=False) for x in batch])}
 
 
 def _validation_worker_init_fn(worker_id):
@@ -74,6 +75,11 @@ class LineSegmentationDataModule(L.LightningDataModule):
                  num_workers: int = 8):
         super().__init__()
 
+        self.pad_token_id = 0
+        self.bos_token_id = 1
+        self.eos_token_id = 2
+        self.line_token_id = 3
+
         self.save_hyperparameters()
         self.im_transforms = DonutImageProcessor.from_pretrained("naver-clova-ix/donut-base-finetuned-cord-v2")
 
@@ -83,16 +89,23 @@ class LineSegmentationDataModule(L.LightningDataModule):
         """
         self.train_set = BaselineSegmentationDataset(self.hparams.training_data,
                                                      im_transforms=self.im_transforms,
-                                                     augmentation=self.hparams.augmentation)
+                                                     augmentation=self.hparams.augmentation,
+                                                     pad_token_id=self.pad_token_id,
+                                                     eos_token_id=self.eos_token_id,
+                                                     line_token_id=self.line_token_id)
 
         self.val_set = BaselineSegmentationDataset(self.hparams.evaluation_data,
                                                    im_transforms=self.im_transforms,
-                                                   augmentation=False)
+                                                   augmentation=False,
+                                                   pad_token_id=self.pad_token_id,
+                                                   eos_token_id=self.eos_token_id,
+                                                   line_token_id=self.line_token_id)
+
         self.collator = partial(collate_curves,
                                 max_lines_in_page=min(max(self.train_set.max_lines_in_page,
                                                           self.val_set.max_lines_in_page),
                                                       self.train_set.max_pos_embeddings),
-                                pad_token_id=0)
+                                pad_token_id=self.pad_token_id)
 
     def train_dataloader(self):
         return DataLoader(self.train_set,
@@ -128,13 +141,19 @@ class BaselineSegmentationDataset(Dataset):
                  files: Sequence[Union[str, 'PathLike']],
                  im_transforms=None,
                  augmentation: bool = False,
-                 max_pos_embeddings: int = 767) -> None:
+                 max_pos_embeddings: int = 767,
+                 pad_token_id: int = 0,
+                 eos_token_id: int = 2,
+                 line_token_id: int = 3) -> None:
         self.files = files
         self.transforms = im_transforms
         self.aug = None
         self.arrow_table = None
         self.max_lines_in_page = 0
         self.max_pos_embeddings = max_pos_embeddings
+        self.pad_token_id = pad_token_id
+        self.eos_token_id = eos_token_id
+        self.line_token_id = line_token_id
 
         for file in files:
             with pa.memory_map(file, 'rb') as source:
@@ -179,11 +198,21 @@ class BaselineSegmentationDataset(Dataset):
             im = im.permute((1, 2, 0)).numpy()
             o = self.aug(image=im)
             im = torch.from_numpy(o['image'].transpose(2, 0, 1))
-
-        lines = torch.tensor([x['curve'] for x in page_data])
+        lines = [x['curve'] for x in page_data]
+        lines.append(8 * [0])
+        lines = torch.tensor(lines)
+        # one-hot encode cls here so we can embed curves and classes with a
+        # single linear projection.
+        line_cls = torch.full((len(lines),), self.line_token_id-1, dtype=torch.long)
+        line_cls[-1] = self.eos_token_id-1
+        line_cls = F.one_hot(line_cls, num_classes=3)
+        lines = torch.cat([line_cls, lines], dim=-1)
+        target_mask = torch.ones_like(lines, dtype=torch.bool)
+        target_mask[-1:, 3:] = False
         # concatenate line class in front of line
-        lines = torch.cat([torch.ones(lines.shape[0], 1), lines], dim=-1)
-        return {'image': im, 'target': lines}
+        return {'image': im,
+                'target': lines,
+                'target_mask': target_mask}
 
     def __len__(self) -> int:
         return len(self.arrow_table)

@@ -37,8 +37,8 @@ class MBartForCurveRegression(MBartPreTrainedModel, GenerationMixin):
         super().__init__(config)
         self.model = MBartDecoderWrapper(config)
 
-        self.model.decoder.set_input_embeddings(nn.Linear(9, config.hidden_size, bias=False))
-        self.head = nn.Linear(config.hidden_size, 9, bias=False)
+        self.model.decoder.set_input_embeddings(nn.Linear(11, config.hidden_size, bias=False))
+        self.head = nn.Linear(config.hidden_size, 11, bias=False)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -63,11 +63,11 @@ class MBartForCurveRegression(MBartPreTrainedModel, GenerationMixin):
 
     def _shift_right(self, input_curves: torch.FloatTensor):
         """
-        Shifts a (B, S, 9)-shaped tensor to the right and preprends a pad token
+        Shifts a (B, S, 11)-shaped tensor to the right and preprends a BOS token
         """
         shifted_input_curves = input_curves.new_zeros(input_curves.shape)
         shifted_input_curves[..., 1:, :] = input_curves[..., :-1, :].clone()
-        shifted_input_curves[..., 0, :] = 0
+        shifted_input_curves[..., 0, self.config.bos_token_id] = 1
         return shifted_input_curves
 
     def forward(self,
@@ -86,7 +86,7 @@ class MBartForCurveRegression(MBartPreTrainedModel, GenerationMixin):
                 return_dict: Optional[bool] = None) -> Union[Tuple, CausalLMOutputWithCrossAttentions]:
         r"""
         Args:
-            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length, 9)`):
+            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length, 11)`):
                 Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you
                 provide it.
             attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -126,7 +126,7 @@ class MBartForCurveRegression(MBartPreTrainedModel, GenerationMixin):
                 If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those
                 that don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of
                 all `decoder_input_ids` of shape `(batch_size, sequence_length)`.
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length, 9)`, *optional*):
+            labels (`torch.LongTensor` of shape `(batch_size, sequence_length, 11)`, *optional*):
             use_cache (`bool`, *optional*):
                 If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
                 (see `past_key_values`).
@@ -169,7 +169,7 @@ class MBartForCurveRegression(MBartPreTrainedModel, GenerationMixin):
         if input_ids is None and inputs_embeds is None:
             input_ids = self._shift_right(labels)
 
-        # compute inputs_embeds here is our (B, S, 9)-shaped input_ids confuse
+        # compute inputs_embeds here is our (B, S, 11)-shaped input_ids confuse
         # the internal decoder logic.
         if inputs_embeds is None:
             inputs_embeds = self.model.decoder.embed_tokens(input_ids)

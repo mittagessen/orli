@@ -53,12 +53,10 @@ class SegmentationModel(L.LightningModule):
                  cos_t_max=30,
                  cos_min_lr=1e-4,
                  warmup=15000,
+                 sos_token_id=1,
+                 pad_token_id=0,
                  **kwargs):
         super().__init__()
-
-        self.best_epoch = -1
-        self.best_metric = 0.0
-        self.best_model = None
 
         self.save_hyperparameters()
 
@@ -79,16 +77,10 @@ class SegmentationModel(L.LightningModule):
             hidden_state = self.model.encoder(pixel_values=batch['image']).last_hidden_state
             # decoder shifts targets internally to right
             output = self.model.decoder(labels=batch['target'], encoder_hidden_states=hidden_state)
-            # split up objectness scores and curve regressions as we only
-            # compute the regression loss on the non-padded part of the lines.
-            class_target = batch['target'][..., 0]
-            class_pred = output.logits[..., 0]
-            curve_target = batch['target'][..., 1:]
-            curve_pred = output.logits[..., 1:]
-            loss_cls = F.binary_cross_entropy_with_logits(class_pred.view(-1), class_target.view(-1))
-            target_mask = class_target.bool()
-            loss_curves = F.binary_cross_entropy_with_logits(curve_pred[target_mask].view(-1), curve_target[target_mask.bool()].view(-1))
-            return loss_cls + loss_curves
+            # mask out curves and class scores beyond EOS token
+            pred = output.logits[batch['target_mask']].view(-1)
+            target = batch['target'][batch['target_mask']].view(-1)
+            return F.binary_cross_entropy_with_logits(pred, target)
         except RuntimeError as e:
             if is_oom_error(e):
                 logger.warning('Out of memory error in trainer. Skipping batch and freeing caches.')
