@@ -58,6 +58,8 @@ def message(msg, **styles):
 
 
 def to_ptl_device(device: str) -> Tuple[str, Optional[List[int]]]:
+    if device.strip() == 'auto':
+        return 'auto', 'auto'
     devices = device.split(',')
     if devices[0] in ['cpu', 'mps']:
         return devices[0], 'auto'
