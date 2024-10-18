@@ -7,8 +7,6 @@ from rich.logging import RichHandler
 from rich.traceback import install
 
 from .train import train
-from .test import test
-
 
 def set_logger(logger=None, level=logging.ERROR):
     logger.addHandler(RichHandler(rich_tracebacks=True))
@@ -67,7 +65,6 @@ def cli(ctx, verbose, seed, deterministic, device, precision, autocast):
     set_logger(logger, level=30 - min(10 * verbose, 20))
 
 cli.add_command(train)
-cli.add_command(test)
 
 if __name__ == '__main__':
     cli()
