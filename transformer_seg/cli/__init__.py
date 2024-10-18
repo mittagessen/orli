@@ -6,8 +6,6 @@ from PIL import Image
 from rich.logging import RichHandler
 from rich.traceback import install
 
-from kraken.lib import log
-
 from .train import train
 from .test import test
 
@@ -66,7 +64,7 @@ def cli(ctx, verbose, seed, deterministic, device, precision, autocast):
     ctx.meta['device'] = device
     ctx.meta['precision'] = precision
     ctx.meta['autocast'] = autocast
-    log.set_logger(logger, level=30 - min(10 * verbose, 20))
+    set_logger(logger, level=30 - min(10 * verbose, 20))
 
 cli.add_command(train)
 cli.add_command(test)
