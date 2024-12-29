@@ -15,10 +15,10 @@
 """
 Training loop interception helpers
 """
+import timm
 import torch
 import logging
 import lightning.pytorch as L
-import torch.nn.functional as F
 
 from torch import nn
 from lightning.pytorch.callbacks import EarlyStopping
@@ -27,8 +27,10 @@ from lightning.pytorch.utilities.memory import (garbage_collection_cuda,
 from torch.optim import lr_scheduler
 from torchmetrics.aggregation import MeanMetric
 
-from transformer_seg.decoder import MBartForCurveRegression
-from transformers import DonutSwinModel
+from typing import Literal, Tuple
+
+from transformer_seg.fusion import bytellama_vision_decoder, TsegModel
+
 
 logger = logging.getLogger(__name__)
 
@@ -39,31 +41,51 @@ class SegmentationModel(L.LightningModule):
     recognition model.
     """
     def __init__(self,
-                 quit='fixed',
-                 lag=10,
-                 optimizer='AdamW',
-                 lr=1e-3,
-                 momentum=0.9,
-                 weight_decay=1e-3,
-                 schedule='cosine',
-                 step_size=10,
-                 gamma=0.1,
-                 rop_factor=0.1,
-                 rop_patience=5,
-                 cos_t_max=30,
-                 cos_min_lr=1e-4,
-                 warmup=15000,
-                 sos_token_id=1,
-                 pad_token_id=0,
+                 quit: Literal['fixed', 'early'] = 'fixed',
+                 lag: int = 10,
+                 optimizer: str = 'Mars',
+                 lr: float = 1e-3,
+                 momentum: float = 0.9,
+                 weight_decay: float = 1e-3,
+                 schedule: Literal['cosine', 'exponential', 'step', 'reduceonplateau', 'constant'] = 'cosine',
+                 step_size: int = 10,
+                 gamma: float = 0.1,
+                 rop_factor: float = 0.1,
+                 rop_patience: int = 5,
+                 cos_t_max: float = 30,
+                 cos_min_lr: float = 1e-4,
+                 warmup: int = 15000,
+                 encoder: str = 'swin_base_patch4_window12_384.ms_in22k',
+                 encoder_input_size: Tuple[int, int] = (2560, 1920),
+                 decoder: str = 'mittagessen/bytellama_oscar',
                  **kwargs):
         super().__init__()
 
         self.save_hyperparameters()
 
         logger.info('Creating segmentation model')
-        self.model = nn.ModuleDict({'encoder': DonutSwinModel.from_pretrained('mittagessen/transformer_seg_encoder'),
-                                    'decoder': MBartForCurveRegression.from_pretrained('mittagessen/reg_transformer_seg_decoder')})
-        self.model = torch.compile(self.model, mode="reduce-overhead", fullgraph=True)
+
+        # enable fused attn in encoder
+        timm.layers.use_fused_attn(experimental=True)
+
+        encoder_model = timm.create_model(encoder,
+                                          pretrained=True,
+                                          num_classes=0,
+                                          img_size=encoder_input_size,
+                                          global_pool='')
+
+        l_idx = encoder_model.prune_intermediate_layers(indices=(-2,), prune_head=True, prune_norm=True)[0]
+        l_red = encoder_model.feature_info[l_idx]['reduction']
+
+        decoder_model = bytellama_vision_decoder(pretrained=decoder,
+                                                 encoder_max_seq_len=encoder_input_size[0] // l_red * encoder_input_size[1] // l_red)
+
+        self.model = TsegModel(encoder=encoder_model,
+                               decoder=decoder_model,
+                               encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
+                               decoder_embed_dim=decoder_model.tok_embeddings.out_features)
+
+        self.model = torch.compile(self.model)
         self.model.train()
 
         self.val_mean = MeanMetric()
@@ -73,14 +95,19 @@ class SegmentationModel(L.LightningModule):
 
     def _step(self, batch):
         try:
-            # s is max_line_len+1 to make space for first cls, curve tuple.
-            hidden_state = self.model.encoder(pixel_values=batch['image']).last_hidden_state
-            # decoder shifts targets internally to right
-            output = self.model.decoder(labels=batch['target'], encoder_hidden_states=hidden_state)
-            # mask out curves and class scores beyond EOS token
-            pred = output.logits[batch['target_mask']].view(-1)
-            target = batch['target'][batch['target_mask']].view(-1)
-            return F.binary_cross_entropy_with_logits(pred, target)
+            tokens = batch['tokens']
+            token_mask = batch['token_mask']
+            # shift tokens right.
+            target = tokens[:, 1:, ...].clone()
+            # mask out EOS token
+            tokens[token_mask == 2] = 0
+
+            logits = self.model(tokens=tokens[:, :-1, ...],
+                                encoder_input=batch['image'])
+
+            pred = logits[token_mask[:, 1:, ...] > 0].view(-1)
+            return F.binary_cross_entropy_with_logits(pred, targets.view(-1))
+
         except RuntimeError as e:
             if is_oom_error(e):
                 logger.warning('Out of memory error in trainer. Skipping batch and freeing caches.')
@@ -105,28 +132,6 @@ class SegmentationModel(L.LightningModule):
             self.log('val_metric', self.val_mean.compute(), on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('global_step', self.global_step, on_step=False, on_epoch=True, prog_bar=False, logger=True)
         self.val_mean.reset()
-
-    def on_load_checkpoint(self, checkpoint: dict) -> None:
-        """
-        Drops tensors with mismatching sizes.
-        """
-        state_dict = checkpoint["state_dict"]
-        model_state_dict = self.state_dict()
-        is_changed = False
-        for k in state_dict:
-            if k in model_state_dict:
-                if state_dict[k].shape != model_state_dict[k].shape:
-                    logger.warning(f"Skip loading parameter: {k}, "
-                                   f"required shape: {model_state_dict[k].shape}, "
-                                   f"loaded shape: {state_dict[k].shape}")
-                    state_dict[k] = model_state_dict[k]
-                    is_changed = True
-            else:
-                logger.info(f"Dropping parameter {k}")
-                is_changed = True
-
-        if is_changed:
-            checkpoint.pop("optimizer_states", None)
 
     def save_checkpoint(self, filename):
         self.trainer.save_checkpoint(filename)
@@ -194,6 +199,9 @@ def _configure_optimizer_and_lr_scheduler(hparams, params, loss_tracking_mode='m
     logger.debug(f'Constructing {optimizer} optimizer (lr: {lr}, momentum: {momentum})')
     if optimizer in ['Adam', 'AdamW']:
         optim = getattr(torch.optim, optimizer)(params, lr=lr, weight_decay=weight_decay)
+    elif optimizer == 'Mars':
+        from timm.optim import Mars
+        optim = Mars(params, lr=lr, weight_decay=weight_decay, caution=True)
     else:
         optim = getattr(torch.optim, optimizer)(params,
                                                 lr=lr,

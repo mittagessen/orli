@@ -14,7 +14,7 @@
 # permissions and limitations under the License.
 """
 transformer_seg.cli.train
-~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Command line driver for recognition training.
 """
@@ -34,9 +34,58 @@ logger = logging.getLogger('transformer_seg')
 logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
 
 
+@click.command('compile')
+@click.pass_context
+@click.option('-o', '--output', show_default=True, type=click.Path(), default='dataset.arrow', help='Output dataset file')
+@click.option('-F', '--files', show_default=True, default=None, multiple=True,
+              callback=_validate_manifests, type=click.File(mode='r', lazy=True),
+              help='File(s) with additional paths to training data.')
+@click.option('-u', '--normalization', show_default=True, type=click.Choice(['NFD', 'NFKD', 'NFC', 'NFKC']),
+              default=SEGMENTATION_HYPER_PARAMS['normalization'], help='Ground truth normalization')
+@click.option('-n', '--normalize-whitespace/--no-normalize-whitespace', show_default=True,
+              default=SEGMENTATION_HYPER_PARAMS['normalize_whitespace'], help='Normalizes unicode whitespace')
+@click.argument('ground_truth', nargs=-1, type=click.Path(exists=True, dir_okay=False))
+def compile(ctx, output, files, normalization, normalize_whitespace,
+            ground_truth):
+    """
+    Precompiles a binary dataset from a collection of XML files.
+    """
+    from .util import message
+
+    ground_truth = list(ground_truth)
+
+    if files:
+        ground_truth.extend(files)
+
+    if not ground_truth:
+        raise click.UsageError('No training data was provided to the compile command. Use the `ground_truth` argument.')
+
+    from transformer_seg import dataset
+    from rich.progress import Progress, TimeElapsedColumn, MofNCompleteColumn
+
+    with Progress(*Progress.get_default_columns(),
+                  TimeElapsedColumn(),
+                  MofNCompleteColumn()) as progress:
+        extract_task = progress.add_task('Compiling dataset', total=0, start=False, visible=True if not ctx.meta['verbose'] else False)
+
+        def _update_bar(advance, total):
+            if not progress.tasks[0].started:
+                progress.start_task(extract_task)
+            progress.update(extract_task, total=total, advance=advance)
+
+        dataset.compile(ground_truth,
+                        output,
+                        normalization=normalization,
+                        normalize_whitespace=normalize_whitespace,
+                        callback=_update_bar)
+
+    message(f'Output file written to {output}')
+
+
 @click.command('train')
 @click.pass_context
-@click.option('-i', '--load', default=None, type=click.Path(exists=True), help='Checkpoint to load')
+@click.option('--load-from-checkpoint', default=None, type=click.Path(exists=True), help='Path to checkpoint to load')
+@click.option('--load-from-hub', default=None, help='Identifier of model on huggingface hub, .e.g `mittagessen/llama_party`')
 @click.option('-B', '--batch-size', show_default=True, type=click.INT,
               default=SEGMENTATION_HYPER_PARAMS['batch_size'], help='batch sample size')
 @click.option('-o', '--output', show_default=True, type=click.Path(), default='model', help='Output model file')
@@ -75,7 +124,7 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               type=click.Choice(['Adam',
                                  'AdamW',
                                  'SGD',
-                                 'RMSprop']),
+                                 'Mars']),
               help='Select optimizer')
 @click.option('-r', '--lrate', show_default=True, default=SEGMENTATION_HYPER_PARAMS['lr'], help='Learning rate')
 @click.option('-m', '--momentum', show_default=True, default=SEGMENTATION_HYPER_PARAMS['momentum'], help='Momentum')
@@ -133,9 +182,9 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               default=SEGMENTATION_HYPER_PARAMS['accumulate_grad_batches'],
               help='Number of batches to accumulate gradient across.')
 @click.argument('ground_truth', nargs=-1, callback=_expand_gt, type=click.Path(exists=False, dir_okay=False))
-def train(ctx, load, batch_size, output, freq, quit, epochs,
-          min_epochs, lag, min_delta, optimizer, lrate, momentum, weight_decay,
-          gradient_clip_val, warmup, schedule, gamma, step_size,
+def train(ctx, load_from_checkpoint, load_from_hub, batch_size, output, freq,
+          quit, epochs, min_epochs, lag, min_delta, optimizer, lrate, momentum,
+          weight_decay, gradient_clip_val, warmup, schedule, gamma, step_size,
           sched_patience, cos_max, cos_min_lr, training_files,
           evaluation_files, workers, threads, augment, accumulate_grad_batches,
           ground_truth):
@@ -144,6 +193,9 @@ def train(ctx, load, batch_size, output, freq, quit, epochs,
     """
     if not (0 <= freq <= 1) and freq % 1.0 != 0:
         raise click.BadOptionUsage('freq', 'freq needs to be either in the interval [0,1.0] or a positive integer.')
+
+    if load_from_checkpoint and load_from_hub:
+        raise click.BadOptionsUsage('load_from_checkpoint', 'load_from_* options are mutually exclusive.')
 
     if augment:
         try:
@@ -237,12 +289,16 @@ def train(ctx, load, batch_size, output, freq, quit, epochs,
                       **val_check_interval)
 
     with trainer.init_module():
-        if load:
-            message('Loading model.')
-            model = SegmentationModel.load_from_checkpoint(load, **hyper_params)
-
+        if load_from_checkpoint:
+            message(f'Loading from checkpoint {load_from_checkpoint}.')
+            model = SegmentationModel.load_from_checkpoint(load_from_checkpoint,
+                                                           **hyper_params)
+        elif load_from_hub:
+            message(f'Loading from huggingface hub {load_from_hub}.')
+            model = SegmentationModel.load_from_hub(hub_id=load_from_hub,
+                                                    **hyper_params)
         else:
-            message('Initializing model.')
+            message('Initializing new model.')
             model = SegmentationModel(**hyper_params)
 
     with threadpool_limits(limits=threads):
