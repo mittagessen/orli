@@ -107,7 +107,7 @@ class SegmentationModel(L.LightningModule):
                                 encoder_input=batch['image'])
 
             pred = logits[token_mask[:, 1:, ...] > 0].view(-1)
-            return F.binary_cross_entropy_with_logits(pred, targets.view(-1))
+            return F.binary_cross_entropy_with_logits(pred, target.view(-1))
 
         except RuntimeError as e:
             if is_oom_error(e):
