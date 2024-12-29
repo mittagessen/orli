@@ -28,8 +28,7 @@ from transformer_seg.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                                      TransformerCrossAttentionLayer,
                                      TransformerDecoder, FeedForward,
                                      TransformerSelfAttentionLayer,
-                                     FusionLayer, TiedLinear,
-                                     scale_hidden_dim_for_mlp,
+                                     FusionLayer, scale_hidden_dim_for_mlp,
                                      Llama3ScaledRoPE, llama3_mlp,
                                      llama3_2_vision_projection_head)
 
