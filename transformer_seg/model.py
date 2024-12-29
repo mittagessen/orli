@@ -19,6 +19,7 @@ import timm
 import torch
 import logging
 import lightning.pytorch as L
+import torch.nn.functional as F
 
 from torch import nn
 from lightning.pytorch.callbacks import EarlyStopping
