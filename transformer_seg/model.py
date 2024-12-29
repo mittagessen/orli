@@ -107,8 +107,9 @@ class SegmentationModel(L.LightningModule):
             logits = self.model(tokens=tokens,
                                 encoder_input=batch['image'])
 
-            pred = logits[token_mask[:, 1:, ...] > 0].view(-1)
-            return F.binary_cross_entropy_with_logits(pred, target.view(-1))
+            pred = logits[token_mask[:, 1:, ...] > 0]
+            target = target[token_mask[:, 1:, ...] > 0]
+            return F.binary_cross_entropy_with_logits(pred.view(-1), target.view(-1))
 
         except RuntimeError as e:
             if is_oom_error(e):
@@ -120,7 +121,12 @@ class SegmentationModel(L.LightningModule):
     def training_step(self, batch, batch_idx):
         loss = self._step(batch)
         if loss:
-            self.log('train_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+            self.log('train_loss',
+                     loss,
+                     batch_size=batch['tokens'].shape[0],
+                     on_step=True,
+                     prog_bar=True,
+                     logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -131,8 +137,8 @@ class SegmentationModel(L.LightningModule):
 
     def on_validation_epoch_end(self):
         if not self.trainer.sanity_checking:
-            self.log('val_metric', self.val_mean.compute(), on_step=False, on_epoch=True, prog_bar=True, logger=True)
-            self.log('global_step', self.global_step, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+            self.log('val_metric', self.val_mean.compute(), on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            self.log('global_step', self.global_step, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
         self.val_mean.reset()
 
     def save_checkpoint(self, filename):
