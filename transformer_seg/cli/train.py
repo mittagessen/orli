@@ -34,54 +34,6 @@ logger = logging.getLogger('transformer_seg')
 logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
 
 
-@click.command('compile')
-@click.pass_context
-@click.option('-o', '--output', show_default=True, type=click.Path(), default='dataset.arrow', help='Output dataset file')
-@click.option('-F', '--files', show_default=True, default=None, multiple=True,
-              callback=_validate_manifests, type=click.File(mode='r', lazy=True),
-              help='File(s) with additional paths to training data.')
-@click.option('-u', '--normalization', show_default=True, type=click.Choice(['NFD', 'NFKD', 'NFC', 'NFKC']),
-              default=SEGMENTATION_HYPER_PARAMS['normalization'], help='Ground truth normalization')
-@click.option('-n', '--normalize-whitespace/--no-normalize-whitespace', show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['normalize_whitespace'], help='Normalizes unicode whitespace')
-@click.argument('ground_truth', nargs=-1, type=click.Path(exists=True, dir_okay=False))
-def compile(ctx, output, files, normalization, normalize_whitespace,
-            ground_truth):
-    """
-    Precompiles a binary dataset from a collection of XML files.
-    """
-    from .util import message
-
-    ground_truth = list(ground_truth)
-
-    if files:
-        ground_truth.extend(files)
-
-    if not ground_truth:
-        raise click.UsageError('No training data was provided to the compile command. Use the `ground_truth` argument.')
-
-    from transformer_seg import dataset
-    from rich.progress import Progress, TimeElapsedColumn, MofNCompleteColumn
-
-    with Progress(*Progress.get_default_columns(),
-                  TimeElapsedColumn(),
-                  MofNCompleteColumn()) as progress:
-        extract_task = progress.add_task('Compiling dataset', total=0, start=False, visible=True if not ctx.meta['verbose'] else False)
-
-        def _update_bar(advance, total):
-            if not progress.tasks[0].started:
-                progress.start_task(extract_task)
-            progress.update(extract_task, total=total, advance=advance)
-
-        dataset.compile(ground_truth,
-                        output,
-                        normalization=normalization,
-                        normalize_whitespace=normalize_whitespace,
-                        callback=_update_bar)
-
-    message(f'Output file written to {output}')
-
-
 @click.command('train')
 @click.pass_context
 @click.option('--load-from-checkpoint', default=None, type=click.Path(exists=True), help='Path to checkpoint to load')
