@@ -274,6 +274,8 @@ class TsegModel(nn.Module):
             encoder_config = {k[8:]: v for k, v in config.items() if k.startswith('encoder_')}
             decoder_config = {k[8:]: v for k, v in config.items() if k.startswith('decoder_')}
 
+        decoder_config['vocab_size'] = 11
+
         # enable fused attn in encoder
         timm.layers.use_fused_attn(experimental=True)
 
@@ -290,12 +292,14 @@ class TsegModel(nn.Module):
         model = cls(encoder=encoder_model,
                     decoder=decoder_model,
                     encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
-                    decoder_embed_dim=decoder_model.tok_embeddings.embedding_dim)
+                    decoder_embed_dim=decoder_model.tok_embeddings.out_features)
 
         weight_path = hf_hub_download(repo_id=pretrained, filename='model.safetensors')
         from safetensors import safe_open
         with safe_open(weight_path, framework='pt') as f:
             state_dict = {k: f.get_tensor(k) for k in f.keys()}
+        # we reinitialize the embeddings
+        state_dict.pop('decoder.tok_embeddings.weight')
         model.load_state_dict(state_dict, strict=False)
 
         return model
