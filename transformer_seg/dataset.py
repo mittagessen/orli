@@ -33,8 +33,6 @@ from PIL import Image
 
 from torch.utils.data import default_collate
 
-from transformers import DonutImageProcessor
-
 if TYPE_CHECKING:
     from os import PathLike
 
