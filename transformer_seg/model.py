@@ -102,8 +102,9 @@ class SegmentationModel(L.LightningModule):
             target = tokens[:, 1:, ...].clone()
             # mask out EOS token
             tokens[token_mask == 2] = 0
+            tokens = tokens[:, :-1, ...]
 
-            logits = self.model(tokens=tokens[:, :-1, ...],
+            logits = self.model(tokens=tokens,
                                 encoder_input=batch['image'])
 
             pred = logits[token_mask[:, 1:, ...] > 0].view(-1)
