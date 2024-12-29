@@ -44,12 +44,12 @@ Image.MAX_IMAGE_PIXELS = 20000 ** 2
               help='Select device to use (cpu, cuda:0, cuda:1, ...)')
 @click.option('--precision',
               show_default=True,
-              default='32',
-              type=click.Choice(['64', '32', 'bf16', '16']),
+              default='32-true',
+              type=click.Choice(['transformer-engine', 'transformer-engine-float16', '16-true', '16-mixed', 'bf16-true', 'bf16-mixed', '32-true', '64-true']),
               help='Numerical precision to use for training. Default is 32-bit single-point precision.')
-@click.option('-2', '--autocast', default=False, show_default=True, flag_value=True,
-              help='On compatible devices, uses autocast for `segment` which lower the memory usage.')
-def cli(ctx, verbose, seed, deterministic, device, precision, autocast):
+@click.option('--threads', default=1, show_default=True, type=click.IntRange(1),
+              help='Size of thread pools for intra-op parallelization')
+def cli(ctx, verbose, seed, deterministic, device, precision, threads):
     ctx.meta['deterministic'] = False if not deterministic else 'warn'
     if seed:
         from lightning.pytorch import seed_everything
@@ -61,7 +61,7 @@ def cli(ctx, verbose, seed, deterministic, device, precision, autocast):
     ctx.meta['verbose'] = verbose
     ctx.meta['device'] = device
     ctx.meta['precision'] = precision
-    ctx.meta['autocast'] = autocast
+    ctx.meta['threads'] = threads
     set_logger(logger, level=30 - min(10 * verbose, 20))
 
 cli.add_command(train)
