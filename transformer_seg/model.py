@@ -86,6 +86,12 @@ class SegmentationModel(L.LightningModule):
                                encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
                                decoder_embed_dim=decoder_model.tok_embeddings.out_features)
 
+
+        self.model = PartyModel(encoder=encoder_model,
+                                decoder=decoder_model,
+                                encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
+                                decoder_embed_dim=decoder_model.tok_embeddings.embedding_dim)
+
         if freeze_encoder:
             for param in self.model.encoder.parameters():
                 param.requires_grad = False
@@ -159,6 +165,11 @@ class SegmentationModel(L.LightningModule):
         module.model = TsegModel.from_huggingface(hub_id)
         module.model = torch.compile(module.model)
         module.model.train()
+
+        if kwargs['freeze_encoder']:
+            for param in module.model.encoder.parameters():
+                param.requires_grad = False
+
         return module
 
     def configure_callbacks(self):
