@@ -74,7 +74,7 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               help='Minimum improvement between epochs to reset early stopping. Default is scales the delta by the best loss')
 @click.option('--optimizer',
               show_default=True,
-              default=RECOGNITION_HYPER_PARAMS['optimizer'],
+              default=SEGMENTATION_HYPER_PARAMS['optimizer'],
               type=click.Choice(['Adam',
                                  'AdamW',
                                  'SGD',
