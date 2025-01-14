@@ -60,8 +60,7 @@ def collate_curves(batch,
     Concatenates and pads curves.
     """
     return {'image': default_collate([item['image'] for item in batch]),
-            'tokens': torch.stack([F.pad(x['tokens'], pad=(0, 0, 0, max_lines_in_page-len(x['tokens'])), value=0) for x in batch]),
-            'token_mask': torch.stack([F.pad(x['token_mask'], pad=(0, 0, 0, max_lines_in_page-len(x['token_mask'])), value=0) for x in batch])}
+            'tokens': torch.stack([F.pad(x['tokens'], pad=(0, 0, 0, max_lines_in_page-len(x['tokens'])), value=-1) for x in batch])}
 
 
 def _validation_worker_init_fn(worker_id):
@@ -214,7 +213,7 @@ class BaselineSegmentationDataset(Dataset):
             im = torch.from_numpy(o['image'].transpose(2, 0, 1))
 
         lines = [x['curve'] for x in page_data]
-        lines.append(8 * [0])
+        lines.append(8 * [-1.])
         lines.insert(0, 8 * [0])
         lines = torch.tensor(lines)
         # one-hot encode cls here so we can embed curves and classes with a
@@ -224,17 +223,8 @@ class BaselineSegmentationDataset(Dataset):
         line_cls[-1] = self.eos_token_id-1
         line_cls = F.one_hot(line_cls, num_classes=3)
         lines = torch.cat([line_cls, lines], dim=-1)
-        # mask values:
-        # 0 = padding (curve points behind EOS token)
-        # 1 = non EOS token sequence
-        # 2 = EOS token
-        token_mask = torch.ones_like(lines, dtype=torch.uint8)
-        token_mask[-1:, 3:] = 0
-        token_mask[-1, :3] = 2
-
         return {'image': im,
-                'tokens': lines,
-                'token_mask': token_mask}
+                'tokens': lines}
 
     def __len__(self) -> int:
         return len(self.arrow_table)

@@ -21,7 +21,6 @@ import logging
 import lightning.pytorch as L
 import torch.nn.functional as F
 
-from torch import nn
 from lightning.pytorch.callbacks import EarlyStopping
 from lightning.pytorch.utilities.memory import (garbage_collection_cuda,
                                                 is_oom_error)
@@ -97,19 +96,21 @@ class SegmentationModel(L.LightningModule):
     def _step(self, batch):
         try:
             tokens = batch['tokens']
-            token_mask = batch['token_mask']
-            # shift tokens right.
-            target = tokens[:, 1:, ...].clone()
-            # mask out EOS token
-            tokens[token_mask == 2] = 0
-            tokens = tokens[:, :-1, ...]
+            # shift the tokens to create targets
+            ignore_idxs = torch.full((tokens.shape[0], 1, 11),
+                                     -1,
+                                     dtype=tokens.dtype, device=tokens.device)
+            targets = torch.hstack((tokens[..., 1:, :], ignore_idxs)).view(-1)
 
+            # our tokens already contain BOS/EOS tokens so we just run it
+            # through the model after replacing ignored indices.
+            tokens.masked_fill_(tokens == -1.0, 0)
             logits = self.model(tokens=tokens,
-                                encoder_input=batch['image'])
+                                encoder_input=batch['image']).view(-1)
 
-            pred = logits[token_mask[:, 1:, ...] > 0]
-            target = target[token_mask[:, 1:, ...] > 0]
-            return F.binary_cross_entropy_with_logits(pred.view(-1), target.view(-1))
+            pred = logits[targets != -1]
+            targets = targets[targets != -1]
+            return F.binary_cross_entropy_with_logits(pred, targets)
 
         except RuntimeError as e:
             if is_oom_error(e):
@@ -150,7 +151,7 @@ class SegmentationModel(L.LightningModule):
         Loads weights from a huggingface hub repository.
         """
         module = cls(*args, **kwargs, pretrained=False)
-        module.model = TSegModel.from_huggingface(hub_id)
+        module.model = TsegModel.from_huggingface(hub_id)
         module.model = torch.compile(module.model)
         module.model.train()
         return module
