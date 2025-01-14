@@ -62,7 +62,7 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               default=SEGMENTATION_HYPER_PARAMS['min_epochs'],
               help='Minimal number of epochs to train for when using early stopping.')
 @click.option('--freeze-encoder/--no-freeze-encoder', show_default=True,
-              default=False, help='Switch to freeze the encoder')
+              default=SEGMENTATION_HYPER_PARAMS['freeze_encoder'], help='Switch to freeze the encoder')
 @click.option('--lag',
               show_default=True,
               default=SEGMENTATION_HYPER_PARAMS['lag'],

@@ -43,4 +43,5 @@ SEGMENTATION_HYPER_PARAMS = {'freq': 1.0,
                              'warmup': 1000,
                              'accumulate_grad_batches': 8,
                              'gradient_clip_val': 1.0,
+                             'freeze_encoder': False
                              }
