@@ -100,40 +100,31 @@ class SegmentationModel(L.LightningModule):
         return self.model(pixel_values=x)
 
     def _step(self, batch):
-        try:
-            tokens = batch['tokens']
-            # shift the tokens to create targets
-            ignore_idxs = torch.full((tokens.shape[0], 1, 11),
-                                     -1,
-                                     dtype=tokens.dtype, device=tokens.device)
-            targets = torch.hstack((tokens[..., 1:, :], ignore_idxs)).view(-1)
+        tokens = batch['tokens']
+        # shift the tokens to create targets
+        ignore_idxs = torch.full((tokens.shape[0], 1, 11),
+                                 -1,
+                                 dtype=tokens.dtype, device=tokens.device)
+        targets = torch.hstack((tokens[..., 1:, :], ignore_idxs)).view(-1)
 
-            # our tokens already contain BOS/EOS tokens so we just run it
-            # through the model after replacing ignored indices.
-            tokens.masked_fill_(tokens == -1.0, 0)
-            logits = self.model(tokens=tokens,
-                                encoder_input=batch['image']).view(-1)
+        # our tokens already contain BOS/EOS tokens so we just run it
+        # through the model after replacing ignored indices.
+        tokens.masked_fill_(tokens == -1.0, 0)
+        logits = self.model(tokens=tokens,
+                            encoder_input=batch['image']).view(-1)
 
-            pred = logits[targets != -1]
-            targets = targets[targets != -1]
-            return F.binary_cross_entropy_with_logits(pred, targets)
-
-        except RuntimeError as e:
-            if is_oom_error(e):
-                logger.warning('Out of memory error in trainer. Skipping batch and freeing caches.')
-                garbage_collection_cuda()
-            else:
-                raise
+        pred = logits[targets != -1]
+        targets = targets[targets != -1]
+        return F.binary_cross_entropy_with_logits(pred, targets)
 
     def training_step(self, batch, batch_idx):
         loss = self._step(batch)
-        if loss:
-            self.log('train_loss',
-                     loss,
-                     batch_size=batch['tokens'].shape[0],
-                     on_step=True,
-                     prog_bar=True,
-                     logger=True)
+        self.log('train_loss',
+                 loss,
+                 batch_size=batch['tokens'].shape[0],
+                 on_step=True,
+                 prog_bar=True,
+                 logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
