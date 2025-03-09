@@ -29,7 +29,7 @@ from torchmetrics.aggregation import MeanMetric
 
 from typing import Literal, Tuple
 
-from transformer_seg.fusion import bytellama_vision_decoder, TsegModel
+from transformer_seg.fusion import baseline_decoder, TsegModel
 
 
 logger = logging.getLogger(__name__)
@@ -55,9 +55,8 @@ class SegmentationModel(L.LightningModule):
                  cos_t_max: float = 30,
                  cos_min_lr: float = 1e-4,
                  warmup: int = 15000,
-                 encoder: str = 'swin_base_patch4_window12_384.ms_in22k',
+                 encoder: str = 'convnext_small',
                  encoder_input_size: Tuple[int, int] = (2560, 1920),
-                 decoder: str = 'mittagessen/bytellama_oscar',
                  freeze_encoder: bool = False,
                  **kwargs):
         super().__init__()
@@ -72,14 +71,12 @@ class SegmentationModel(L.LightningModule):
         encoder_model = timm.create_model(encoder,
                                           pretrained=True,
                                           num_classes=0,
-                                          img_size=encoder_input_size,
                                           global_pool='')
 
         l_idx = encoder_model.prune_intermediate_layers(indices=(-2,), prune_head=True, prune_norm=True)[0]
         l_red = encoder_model.feature_info[l_idx]['reduction']
 
-        decoder_model = bytellama_vision_decoder(pretrained=decoder,
-                                                 encoder_max_seq_len=encoder_input_size[0] // l_red * encoder_input_size[1] // l_red)
+        decoder_model = baseline_decoder(encoder_max_seq_len=encoder_input_size[0] // l_red * encoder_input_size[1] // l_red)
 
         self.model = TsegModel(encoder=encoder_model,
                                decoder=decoder_model,
@@ -91,7 +88,7 @@ class SegmentationModel(L.LightningModule):
             for param in self.model.encoder.parameters():
                 param.requires_grad = False
 
-        self.model = torch.compile(self.model)
+        self.model = torch.compile(self.model, dynamic=False)
         self.model.train()
 
         self.val_mean = MeanMetric()
