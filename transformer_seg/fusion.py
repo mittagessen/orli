@@ -353,7 +353,7 @@ class TsegModel(nn.Module):
         Computes the encoder embeddings *without* adding the curve positional
         embeddings.
         """
-        encoder_hidden_states = self.encoder(encoder_input)
+        encoder_hidden_states = self.encoder(encoder_input)[0]
         b, e, *_ = encoder_hidden_states.shape
         encoder_hidden_states = encoder_hidden_states.view(b, e, -1).transpose(1, 2)
         return self.adapter(encoder_hidden_states)

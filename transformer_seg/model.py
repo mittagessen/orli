@@ -70,17 +70,16 @@ class SegmentationModel(L.LightningModule):
 
         encoder_model = timm.create_model(encoder,
                                           pretrained=True,
-                                          num_classes=0,
-                                          global_pool='')
+                                          features_only=True,
+                                          out_indices=[-2])
 
-        l_idx = encoder_model.prune_intermediate_layers(indices=(-2,), prune_head=True, prune_norm=True)[0]
-        l_red = encoder_model.feature_info[l_idx]['reduction']
-
+        out_info = encoder_model.feature_info[encoder_model.feature_info.out_indices[0]]
+        l_red = out_info['reduction']
         decoder_model = baseline_decoder(encoder_max_seq_len=encoder_input_size[0] // l_red * encoder_input_size[1] // l_red)
 
         self.model = TsegModel(encoder=encoder_model,
                                decoder=decoder_model,
-                               encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
+                               encoder_embed_dim=out_info['num_chs'],
                                decoder_embed_dim=decoder_model.tok_embeddings.out_features)
 
 
