@@ -19,11 +19,8 @@ import timm
 import torch
 import logging
 import lightning.pytorch as L
-import torch.nn.functional as F
 
 from lightning.pytorch.callbacks import EarlyStopping
-from lightning.pytorch.utilities.memory import (garbage_collection_cuda,
-                                                is_oom_error)
 from torch.optim import lr_scheduler
 from torchmetrics.aggregation import MeanMetric
 
@@ -33,6 +30,24 @@ from transformer_seg.fusion import baseline_decoder, TsegModel
 
 
 logger = logging.getLogger(__name__)
+
+
+def model_step(model, criterion, batch):
+    tokens = batch['tokens']
+    # shift the tokens to create targets
+    ignore_idxs = torch.full((tokens.shape[0], 1, 11),
+                             -1,
+                             dtype=tokens.dtype, device=tokens.device)
+    targets = torch.hstack((tokens[..., 1:, :], ignore_idxs)).view(-1)
+
+    # our tokens already contain BOS/EOS tokens so we just run it
+    # through the model after replacing ignored indices.
+    tokens.masked_fill_(tokens == -1.0, 0)
+    logits = model(tokens=tokens, encoder_input=batch['image']).view(-1)
+
+    pred = logits[targets != -1]
+    targets = targets[targets != -1]
+    return criterion(pred, targets)
 
 
 class SegmentationModel(L.LightningModule):
@@ -82,39 +97,21 @@ class SegmentationModel(L.LightningModule):
                                encoder_embed_dim=out_info['num_chs'],
                                decoder_embed_dim=decoder_model.tok_embeddings.out_features)
 
-
         if freeze_encoder:
             for param in self.model.encoder.parameters():
                 param.requires_grad = False
 
-        self.model = torch.compile(self.model, dynamic=False)
         self.model.train()
 
         self.val_mean = MeanMetric()
+        self.model_step = torch.compile(model_step, dynamic=False)
+        self.criterion = torch.nn.BCEWithLogitsLoss()
 
     def forward(self, x):
         return self.model(pixel_values=x)
 
-    def _step(self, batch):
-        tokens = batch['tokens']
-        # shift the tokens to create targets
-        ignore_idxs = torch.full((tokens.shape[0], 1, 11),
-                                 -1,
-                                 dtype=tokens.dtype, device=tokens.device)
-        targets = torch.hstack((tokens[..., 1:, :], ignore_idxs)).view(-1)
-
-        # our tokens already contain BOS/EOS tokens so we just run it
-        # through the model after replacing ignored indices.
-        tokens.masked_fill_(tokens == -1.0, 0)
-        logits = self.model(tokens=tokens,
-                            encoder_input=batch['image']).view(-1)
-
-        pred = logits[targets != -1]
-        targets = targets[targets != -1]
-        return F.binary_cross_entropy_with_logits(pred, targets)
-
     def training_step(self, batch, batch_idx):
-        loss = self._step(batch)
+        loss = self.model_step(self.model, self.criterion, batch)
         self.log('train_loss',
                  loss,
                  batch_size=batch['tokens'].shape[0],
@@ -124,9 +121,8 @@ class SegmentationModel(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss = self._step(batch)
-        if loss:
-            self.val_mean.update(loss)
+        loss = self.model_step(self.model, self.criterion, batch)
+        self.val_mean.update(loss)
         return loss
 
     def on_validation_epoch_end(self):
@@ -184,7 +180,7 @@ class SegmentationModel(L.LightningModule):
         if self.hparams.warmup and self.trainer.global_step < self.hparams.warmup:
             lr_scale = min(1.0, float(self.trainer.global_step + 1) / self.hparams.warmup)
             for pg in optimizer.param_groups:
-                if self.hparams.optimizer not in  ['Adam8bit', 'Adam4bit', 'AdamW8bit', 'AdamW4bit', 'AdamWFp8']:
+                if self.hparams.optimizer not in ['Adam8bit', 'Adam4bit', 'AdamW8bit', 'AdamW4bit', 'AdamWFp8']:
                     pg['lr'] = lr_scale * self.hparams.lr
                 else:
                     pg['lr'].fill_(lr_scale * self.hparams.lr)
@@ -200,7 +196,6 @@ class SegmentationModel(L.LightningModule):
                     scheduler.step()
                 else:
                     scheduler.step(metric)
-
 
 
 def _configure_optimizer_and_lr_scheduler(hparams, params, loss_tracking_mode='min'):
