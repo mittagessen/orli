@@ -45,7 +45,7 @@ def model_step(model, criterion, batch):
     tokens.masked_fill_(tokens == -1.0, 0)
     logits = model(tokens=tokens, encoder_input=batch['image']).view(-1)
 
-    pred = logits[targets != -1]
+    pred = logits[targets != -1].sigmoid()
     targets = targets[targets != -1]
     return criterion(pred, targets)
 
@@ -104,8 +104,8 @@ class SegmentationModel(L.LightningModule):
         self.model.train()
 
         self.val_mean = MeanMetric()
-        self.model_step = torch.compile(model_step, dynamic=False)
-        self.criterion = torch.nn.BCEWithLogitsLoss()
+        self.model_step = torch.compile(model_step)
+        self.criterion = torch.nn.MSELoss()
 
     def forward(self, x):
         return self.model(pixel_values=x)
