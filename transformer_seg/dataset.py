@@ -151,7 +151,7 @@ class BaselineSegmentationDataset(Dataset):
                  files: Sequence[Union[str, 'PathLike']],
                  im_transforms=None,
                  augmentation: bool = False,
-                 max_lines_per_page: int = 384,
+                 max_lines_per_page: int = 768,
                  pad_token_id: int = 0,
                  bos_token_id: int = 1,
                  eos_token_id: int = 2,

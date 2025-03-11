@@ -43,7 +43,7 @@ def baseline_decoder(vocab_size: int = 11,
                      num_heads: int = 9,
                      num_kv_heads: int = 3,
                      embed_dim: int = 576,
-                     max_seq_len: int = 384,
+                     max_seq_len: int = 768,
                      intermediate_dim: int = 1536,
                      attn_dropout: int = 0.0,
                      norm_eps: int = 1e-5,
@@ -363,7 +363,7 @@ class TsegModel(nn.Module):
                                bos_id: int = 1,
                                batch_size: int = 8,
                                max_encoder_seq_len: int = 19200,
-                               max_generated_tokens: int = 384,
+                               max_generated_tokens: int = 768,
                                device = 'cpu'):
 
         if self.ready_for_generation:
