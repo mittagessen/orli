@@ -261,6 +261,7 @@ def train(ctx, load_from_checkpoint, load_from_hub, batch_size, output, freq,
             model = SegmentationModel(**hyper_params)
 
     with threadpool_limits(limits=threads):
+        trainer.validate(model, data_module)
         trainer.fit(model, data_module)
 
     if model.best_epoch == -1:
