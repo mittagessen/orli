@@ -15,9 +15,8 @@
 # limitations under the License.
 """Llama vision fusion model"""
 
-import copy
 import logging
-from typing import Generator, Optional, Tuple, Union, List
+from typing import Generator, Optional, Union, List, Dict
 
 import json
 import torch
@@ -26,11 +25,10 @@ from torch import nn
 
 from transformer_seg.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                                      TransformerCrossAttentionLayer,
-                                     TransformerDecoder, FeedForward,
+                                     TransformerDecoder,
                                      TransformerSelfAttentionLayer,
                                      FusionLayer, scale_hidden_dim_for_mlp,
-                                     Llama3ScaledRoPE, llama3_mlp,
-                                     llama3_2_vision_projection_head)
+                                     Llama3ScaledRoPE, llama3_mlp)
 
 
 logger = logging.getLogger(__name__)
@@ -156,7 +154,7 @@ def baseline_decoder(vocab_size: int = 11,
         layers.append(fusion_layer)
 
     line_embeddings = nn.Linear(config['vocab_size'], config['embed_dim'], bias=False)
-    output_proj = nn.Linear(config['embed_dim'], config['vocab_size'], bias=False)
+    output_proj = CurveHead(config['embed_dim'])
 
     decoder = TransformerDecoder(tok_embeddings=line_embeddings,
                                  layers=layers,
@@ -171,11 +169,24 @@ def baseline_decoder(vocab_size: int = 11,
         from safetensors import safe_open
         with safe_open(weight_path, framework='pt') as f:
             state_dict = {k: f.get_tensor(k) for k in f.keys()}
-        # we reinitialize the embeddings
-        state_dict.pop('tok_embeddings.weight')
         decoder.load_state_dict(state_dict, strict=False)
 
     return decoder
+
+class CurveHead(nn.Module):
+    """
+    Classification and regression head for baseline curves.
+    """
+    def __init__(self,
+                 embed_dim: int = 576,
+                 num_cls: int = 3):
+        super().__init__()
+        self.cls_proj = nn.Linear(embed_dim, num_cls, bias=False)
+        self.reg_proj = nn.Linear(embed_dim, 8, bias=False)
+    
+    def forward(self, x) -> Dict[str, torch.Tensor]:
+        return {'tokens': self.cls_proj(x),
+                'curves': self.reg_proj(x)}
 
 
 class TsegModel(nn.Module):

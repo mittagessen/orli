@@ -10,6 +10,7 @@ from torch import nn
 
 from typing import Any
 
+
 class RMSNorm(nn.Module):
     """
     Root Mean Square Normalization in fp32.

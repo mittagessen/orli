@@ -32,22 +32,33 @@ from transformer_seg.fusion import baseline_decoder, TsegModel
 logger = logging.getLogger(__name__)
 
 
-def model_step(model, criterion, batch):
+def model_step(model,
+               cls_criterion,
+               curve_criterion,
+               batch):
     tokens = batch['tokens']
+    curves = batch['curves']
     # shift the tokens to create targets
-    ignore_idxs = torch.full((tokens.shape[0], 1, 11),
-                             -1,
-                             dtype=tokens.dtype, device=tokens.device)
-    targets = torch.hstack((tokens[..., 1:, :], ignore_idxs)).view(-1)
+    ignore_idxs_tokens = torch.full((tokens.shape[0], 1, tokens.shape[2]),
+                                    -1,
+                                    dtype=tokens.dtype, device=tokens.device)
+    ignore_idxs_curves = torch.full((curves.shape[0], 1, curves.shape[2]),
+                                    -1,
+                                    dtype=curves.dtype, device=curves.device)
+
+    target_tokens = torch.hstack((tokens[..., 1:, :], ignore_idxs_tokens)).view(-1)
+    target_curves = torch.hstack((curves[..., 1:, :], ignore_idxs_curves)).view(-1)
 
     # our tokens already contain BOS/EOS tokens so we just run it
     # through the model after replacing ignored indices.
     tokens.masked_fill_(tokens == -1.0, 0)
-    logits = model(tokens=tokens, encoder_input=batch['image']).view(-1)
+    curves.masked_fill_(curves == -1.0, 0)
 
-    pred = logits[targets != -1].sigmoid()
-    targets = targets[targets != -1]
-    return criterion(pred, targets)
+    logits = model(tokens=tokens, encoder_input=batch['image'])
+
+    pred_tokens = logits['tokens'].view(-1)[target_tokens != -1]
+    pred_curves = logits['curves'].view(-1)[target_curves != -1].sigmoid()
+    return 2 * cls_criterion(pred_tokens, target_tokens[target_tokens != -1]) + 5 * curve_criterion(pred_curves, target_curves[target_curves != -1])
 
 
 class SegmentationModel(L.LightningModule):
@@ -105,13 +116,17 @@ class SegmentationModel(L.LightningModule):
 
         self.val_mean = MeanMetric()
         self.model_step = torch.compile(model_step)
-        self.criterion = torch.nn.MSELoss()
+        self.curve_criterion = torch.nn.MSELoss()
+        self.cls_criterion = torch.nn.BCEWithLogitsLoss()
 
     def forward(self, x):
         return self.model(pixel_values=x)
 
     def training_step(self, batch, batch_idx):
-        loss = self.model_step(self.model, self.criterion, batch)
+        loss = self.model_step(self.model,
+                               self.cls_criterion,
+                               self.curve_criterion,
+                               batch)
         self.log('train_loss',
                  loss,
                  batch_size=batch['tokens'].shape[0],
@@ -121,7 +136,10 @@ class SegmentationModel(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss = self.model_step(self.model, self.criterion, batch)
+        loss = self.model_step(self.model,
+                               self.cls_criterion,
+                               self.curve_criterion,
+                               batch)
         self.val_mean.update(loss)
         return loss
 

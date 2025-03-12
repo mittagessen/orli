@@ -60,7 +60,8 @@ def collate_curves(batch,
     Concatenates and pads curves.
     """
     return {'image': default_collate([item['image'] for item in batch]),
-            'tokens': torch.stack([F.pad(x['tokens'], pad=(0, 0, 0, max_lines_in_page-len(x['tokens'])), value=-1) for x in batch])}
+            'tokens': torch.stack([F.pad(x['tokens'], pad=(0, 0, 0, max_lines_in_page-len(x['tokens'])), value=-1) for x in batch]),
+            'curves': torch.stack([F.pad(x['curves'], pad=(0, 0, 0, max_lines_in_page-len(x['curves'])), value=-1) for x in batch])}
 
 
 def _validation_worker_init_fn(worker_id):
@@ -222,9 +223,9 @@ class BaselineSegmentationDataset(Dataset):
         line_cls[0] = self.bos_token_id-1
         line_cls[-1] = self.eos_token_id-1
         line_cls = F.one_hot(line_cls, num_classes=3)
-        lines = torch.cat([line_cls, lines], dim=-1)
         return {'image': im,
-                'tokens': lines}
+                'tokens': line_cls,
+                'curves': lines}
 
     def __len__(self) -> int:
         return len(self.arrow_table)
