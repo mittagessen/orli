@@ -117,7 +117,7 @@ class SegmentationModel(L.LightningModule):
         self.val_mean = MeanMetric()
         self.model_step = torch.compile(model_step)
         self.curve_criterion = torch.nn.MSELoss()
-        self.cls_criterion = torch.nn.BCEWithLogitsLoss()
+        self.cls_criterion = torch.nn.CrossEntropyLoss()
 
     def forward(self, x):
         return self.model(pixel_values=x)
