@@ -54,7 +54,7 @@ def model_step(model,
     tokens.masked_fill_(tokens == -1.0, 0)
     curves.masked_fill_(curves == -1.0, 0)
 
-    logits = model(tokens=tokens, encoder_input=batch['image'])
+    logits = model(tokens=torch.cat([tokens, curves], dim=-1), encoder_input=batch['image'])
 
     pred_tokens = logits['tokens'].view(-1)[target_tokens != -1]
     pred_curves = logits['curves'].view(-1)[target_curves != -1].sigmoid()
