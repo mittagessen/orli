@@ -25,7 +25,7 @@ from torch import nn
 
 from transformer_seg.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                                      TransformerCrossAttentionLayer,
-                                     TransformerDecoder,
+                                     TransformerDecoder, FeedForward,
                                      TransformerSelfAttentionLayer,
                                      FusionLayer, scale_hidden_dim_for_mlp,
                                      Llama3ScaledRoPE, llama3_mlp)
@@ -37,7 +37,7 @@ __all__ = ['baseline_decoder', 'TsegModel']
 
 
 def baseline_decoder(vocab_size: int = 11,
-                     num_layers = 4,
+                     num_layers = 12,
                      num_heads: int = 9,
                      num_kv_heads: int = 3,
                      embed_dim: int = 576,
@@ -46,8 +46,8 @@ def baseline_decoder(vocab_size: int = 11,
                      attn_dropout: int = 0.0,
                      norm_eps: int = 1e-5,
                      rope_base: int = 10000,
-                     scale_factor: int = 32,
                      encoder_max_seq_len: int = 4800,  # start of fusion parameters
+                     fusion_interval: int = 3,
                      pretrained: Optional[str] = None) -> TransformerDecoder:
     """
     Builds a decoder regression baselines.
@@ -84,8 +84,8 @@ def baseline_decoder(vocab_size: int = 11,
               'attn_dropout': attn_dropout,
               'norm_eps': norm_eps,
               'rope_base': rope_base,
-              'scale_factor': scale_factor,
-              'encoder_max_seq_len': encoder_max_seq_len}
+              'encoder_max_seq_len': encoder_max_seq_len,
+              'fusion_interval': fusion_interval}
 
     if pretrained:
         vocab_size = config.pop('vocab_size')
@@ -124,34 +124,37 @@ def baseline_decoder(vocab_size: int = 11,
             mlp_norm=RMSNorm(dim=embed_dim, eps=1e-5),
         )
 
-        attn = MultiHeadAttention(
-            embed_dim=config['embed_dim'],
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            q_proj=nn.Linear(config['embed_dim'], config['num_heads'] * head_dim, bias=False),
-            k_proj=nn.Linear(config['embed_dim'], num_kv_heads * head_dim, bias=False),
-            v_proj=nn.Linear(config['embed_dim'], num_kv_heads * head_dim, bias=False),
-            output_proj=nn.Linear(config['embed_dim'], config['embed_dim'], bias=False),
-            q_norm=RMSNorm(dim=head_dim, eps=1e-05),
-            k_norm=RMSNorm(dim=head_dim, eps=1e-05),
-            pos_embeddings=None,
-            max_seq_len=config['encoder_max_seq_len'],
-            is_causal=False,
-            attn_dropout=0.0,
-        )
+        if idx % config['fusion_interval'] == 0:
+            attn = MultiHeadAttention(
+                embed_dim=config['embed_dim'],
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                q_proj=nn.Linear(config['embed_dim'], config['num_heads'] * head_dim, bias=False),
+                k_proj=nn.Linear(config['embed_dim'], num_kv_heads * head_dim, bias=False),
+                v_proj=nn.Linear(config['embed_dim'], num_kv_heads * head_dim, bias=False),
+                output_proj=nn.Linear(config['embed_dim'], config['embed_dim'], bias=False),
+                q_norm=RMSNorm(dim=head_dim, eps=1e-05),
+                k_norm=RMSNorm(dim=head_dim, eps=1e-05),
+                pos_embeddings=None,
+                max_seq_len=config['encoder_max_seq_len'],
+                is_causal=False,
+                attn_dropout=0.0,
+            )
 
-        mlp = llama3_mlp(dim=config['embed_dim'], hidden_dim=hidden_dim)
-        xattn_layer = TransformerCrossAttentionLayer(
-            attn=attn,
-            mlp=mlp,
-            ca_norm=RMSNorm(dim=embed_dim),
-            mlp_norm=RMSNorm(dim=embed_dim),
-            ca_scale=TanhGate(),
-            mlp_scale=TanhGate(),
-        )
-        fusion_layer = FusionLayer(layer=decoder_layer, fusion_layer=xattn_layer)
-        layers.append(fusion_layer)
+            mlp = llama3_mlp(dim=config['embed_dim'], hidden_dim=hidden_dim)
+            xattn_layer = TransformerCrossAttentionLayer(
+                attn=attn,
+                mlp=mlp,
+                ca_norm=RMSNorm(dim=embed_dim),
+                mlp_norm=RMSNorm(dim=embed_dim),
+                ca_scale=TanhGate(),
+                mlp_scale=TanhGate(),
+            )
+            fusion_layer = FusionLayer(layer=decoder_layer, fusion_layer=xattn_layer)
+            layers.append(fusion_layer)
+        else:
+            layers.append(decoder_layer)
 
     line_embeddings = nn.Linear(config['vocab_size'], config['embed_dim'], bias=False)
     output_proj = CurveHead(config['embed_dim'])
@@ -173,6 +176,7 @@ def baseline_decoder(vocab_size: int = 11,
 
     return decoder
 
+
 class CurveHead(nn.Module):
     """
     Classification and regression head for baseline curves.
@@ -188,6 +192,46 @@ class CurveHead(nn.Module):
         return {'tokens': self.cls_proj(x),
                 'curves': self.reg_proj(x)}
 
+
+def party_adapter(num_layers: int,
+                  num_heads: int,
+                  encoder_embed_dim: int,
+                  decoder_embed_dim: int) -> nn.Sequential:
+    """
+    Builds an adapter head consisting of `num_layers` self attention layers
+    followed by a linear projection of encoder_embed_dim to decoder_embed_dim.
+    """
+    mlp_ratio = 4
+    hidden_dim = int(mlp_ratio * encoder_embed_dim)
+    head_dim = encoder_embed_dim // num_heads
+    num_kv_heads = num_heads
+    layers = []
+    for _ in range(num_layers):
+        self_attn = MultiHeadAttention(embed_dim=encoder_embed_dim,
+                                       num_heads=num_heads,
+                                       num_kv_heads=num_heads,
+                                       head_dim=head_dim,
+                                       q_proj=nn.Linear(encoder_embed_dim, num_heads * head_dim, bias=False),
+                                       k_proj=nn.Linear(encoder_embed_dim, num_kv_heads * head_dim, bias=False),
+                                       v_proj=nn.Linear(encoder_embed_dim, num_kv_heads * head_dim, bias=False),
+                                       output_proj=nn.Linear(encoder_embed_dim, encoder_embed_dim, bias=False),
+                                       pos_embeddings=None,
+                                       attn_dropout=0.0,
+                                       is_causal=False)
+
+        mlp = FeedForward(gate_proj=nn.Linear(encoder_embed_dim, hidden_dim),
+                          down_proj=nn.Linear(hidden_dim, encoder_embed_dim),
+                          up_proj=None)
+
+        layer = TransformerSelfAttentionLayer(attn=self_attn,
+                                              mlp=mlp,
+                                              sa_norm=RMSNorm(encoder_embed_dim, eps=1e-5),
+                                              mlp_norm=RMSNorm(encoder_embed_dim, eps=1e-5),
+                                              sa_scale=TanhGate(),
+                                              mlp_scale=TanhGate())
+        layers.append(layer)
+    layers.append(nn.Linear(encoder_embed_dim, decoder_embed_dim))
+    return nn.Sequential(*layers)
 
 class TsegModel(nn.Module):
     """
@@ -208,7 +252,10 @@ class TsegModel(nn.Module):
         self.encoder = encoder
         self.decoder = decoder
 
-        self.adapter = nn.Linear(encoder_embed_dim, decoder_embed_dim)
+        self.adapter = party_adapter(4,
+                                     8,
+                                     encoder_embed_dim,
+                                     decoder_embed_dim)
 
         self.ready_for_generation = False
 
@@ -383,7 +430,7 @@ class TsegModel(nn.Module):
         self._batch_size = batch_size
         self._max_generated_tokens = max_generated_tokens
 
-         # generate a regular causal mask
+        # generate a regular causal mask
         self._masks = torch.tril(torch.ones(max_generated_tokens,
                                             max_generated_tokens,
                                             dtype=torch.bool,
@@ -422,7 +469,7 @@ class TsegModel(nn.Module):
             BOS and EOS have already been stripped from the token sequences.
             Entries beyond the EOS are padded with zeroes.
         """
-        logger.info(f'Computing encoder embeddings')
+        logger.info('Computing encoder embeddings')
 
         encoder_hidden_states = self.forward_encoder_embeddings(encoder_input).repeat(self._batch_size, 1, 1)
 
