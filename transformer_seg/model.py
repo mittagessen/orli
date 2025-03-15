@@ -81,7 +81,7 @@ class SegmentationModel(L.LightningModule):
                  cos_t_max: float = 30,
                  cos_min_lr: float = 1e-4,
                  warmup: int = 15000,
-                 encoder: str = 'swin_base_patch4_window12_384.ms_in22k',
+                 encoder: str = 'convnext_small',
                  encoder_input_size: Tuple[int, int] = (2560, 1920),
                  freeze_encoder: bool = False,
                  **kwargs):
@@ -95,19 +95,17 @@ class SegmentationModel(L.LightningModule):
         timm.layers.use_fused_attn(experimental=True)
 
         encoder_model = timm.create_model(encoder,
-                                          pretrained=pretrained,
-                                          num_classes=0,
-                                          img_size=encoder_input_size,
-                                          global_pool='')
+                                          pretrained=True,
+                                          features_only=True,
+                                          out_indices=[-2])
 
-        l_idx = encoder_model.prune_intermediate_layers(indices=(-2,), prune_head=True, prune_norm=True)[0]
-        l_red = encoder_model.feature_info[l_idx]['reduction']
-
+        out_info = encoder_model.feature_info[encoder_model.feature_info.out_indices[0]]
+        l_red = out_info['reduction']
         decoder_model = baseline_decoder(encoder_max_seq_len=encoder_input_size[0] // l_red * encoder_input_size[1] // l_red)
 
         self.model = TsegModel(encoder=encoder_model,
                                decoder=decoder_model,
-                               encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
+                               encoder_embed_dim=out_info['num_chs'],
                                decoder_embed_dim=decoder_model.tok_embeddings.out_features)
 
         if freeze_encoder:
