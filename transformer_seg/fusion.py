@@ -37,7 +37,7 @@ __all__ = ['baseline_decoder', 'TsegModel']
 
 
 def baseline_decoder(vocab_size: int = 11,
-                     num_layers = 3,
+                     num_layers = 4,
                      num_heads: int = 9,
                      num_kv_heads: int = 3,
                      embed_dim: int = 576,
@@ -252,10 +252,7 @@ class TsegModel(nn.Module):
         self.encoder = encoder
         self.decoder = decoder
 
-        self.adapter = party_adapter(2,
-                                     8,
-                                     encoder_embed_dim,
-                                     decoder_embed_dim)
+        self.adapter = nn.Linear(encoder_embed_dim, decoder_embed_dim)
 
         self.ready_for_generation = False
 
