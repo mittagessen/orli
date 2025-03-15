@@ -37,7 +37,7 @@ __all__ = ['baseline_decoder', 'TsegModel']
 
 
 def baseline_decoder(vocab_size: int = 11,
-                     num_layers = 12,
+                     num_layers = 3,
                      num_heads: int = 9,
                      num_kv_heads: int = 3,
                      embed_dim: int = 576,
@@ -47,7 +47,7 @@ def baseline_decoder(vocab_size: int = 11,
                      norm_eps: int = 1e-5,
                      rope_base: int = 10000,
                      encoder_max_seq_len: int = 4800,  # start of fusion parameters
-                     fusion_interval: int = 3,
+                     fusion_interval: int = 1,
                      pretrained: Optional[str] = None) -> TransformerDecoder:
     """
     Builds a decoder regression baselines.
@@ -252,7 +252,7 @@ class TsegModel(nn.Module):
         self.encoder = encoder
         self.decoder = decoder
 
-        self.adapter = party_adapter(4,
+        self.adapter = party_adapter(2,
                                      8,
                                      encoder_embed_dim,
                                      decoder_embed_dim)
