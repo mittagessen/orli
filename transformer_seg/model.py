@@ -107,7 +107,7 @@ class SegmentationModel(L.LightningModule):
 
         self.model = TsegModel(encoder=encoder_model,
                                decoder=decoder_model,
-                               encoder_embed_dim=out_info['num_chs'],
+                               encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
                                decoder_embed_dim=decoder_model.tok_embeddings.out_features)
 
         if freeze_encoder:
