@@ -95,7 +95,7 @@ class SegmentationModel(L.LightningModule):
         timm.layers.use_fused_attn(experimental=True)
 
         encoder_model = timm.create_model(encoder,
-                                          pretrained=pretrained,
+                                          pretrained=True,
                                           num_classes=0,
                                           img_size=encoder_input_size,
                                           global_pool='')
