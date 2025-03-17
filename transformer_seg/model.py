@@ -95,7 +95,7 @@ class SegmentationModel(L.LightningModule):
         timm.layers.use_fused_attn(experimental=True)
 
         encoder_model = timm.create_model(encoder,
-                                          pretrained=True,
+                                          pretrained=False,
                                           num_classes=0,
                                           img_size=encoder_input_size,
                                           global_pool='')
@@ -155,19 +155,18 @@ class SegmentationModel(L.LightningModule):
         self.trainer.save_checkpoint(filename)
 
     @classmethod
-    def load_from_hub(cls, hub_id=None, *args, **kwargs):
+    def load_from_repo(cls, id=None, *args, **kwargs):
         """
-        Loads weights from a huggingface hub repository.
+        Loads weights from the HTRMoPo repository.
         """
+        from htrmopo import get_model
+
         module = cls(*args, **kwargs, pretrained=False)
-        module.model = TsegModel.from_huggingface(hub_id)
-        module.model = torch.compile(module.model)
+
+        model_path = get_model(id) / 'model.safetensors'
+
+        module.model = TsegModel.from_safetensors(model_path)
         module.model.train()
-
-        if kwargs['freeze_encoder']:
-            for param in module.model.encoder.parameters():
-                param.requires_grad = False
-
         return module
 
     def configure_callbacks(self):

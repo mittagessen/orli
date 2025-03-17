@@ -8,6 +8,7 @@ from rich.traceback import install
 
 from .train import train
 
+
 def set_logger(logger=None, level=logging.ERROR):
     logger.addHandler(RichHandler(rich_tracebacks=True))
     logger.setLevel(level)
@@ -63,6 +64,7 @@ def cli(ctx, verbose, seed, deterministic, device, precision, threads):
     ctx.meta['precision'] = precision
     ctx.meta['threads'] = threads
     set_logger(logger, level=30 - min(10 * verbose, 20))
+
 
 cli.add_command(train)
 

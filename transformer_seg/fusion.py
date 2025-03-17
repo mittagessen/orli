@@ -16,7 +16,7 @@
 """Llama vision fusion model"""
 
 import logging
-from typing import Generator, Optional, Union, List, Dict
+from typing import Generator, Optional, Union, List, Dict, TYPE_CHECKING
 
 import json
 import torch
@@ -30,6 +30,8 @@ from transformer_seg.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                                      FusionLayer, scale_hidden_dim_for_mlp,
                                      Llama3ScaledRoPE, llama3_mlp)
 
+if TYPE_CHECKING:
+    from os import PathLike
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +39,7 @@ __all__ = ['baseline_decoder', 'TsegModel']
 
 
 def baseline_decoder(vocab_size: int = 11,
-                     num_layers = 4,
+                     num_layers: int = 4,
                      num_heads: int = 9,
                      num_kv_heads: int = 3,
                      embed_dim: int = 576,
@@ -187,7 +189,7 @@ class CurveHead(nn.Module):
         super().__init__()
         self.cls_proj = nn.Linear(embed_dim, num_cls, bias=False)
         self.reg_proj = nn.Linear(embed_dim, 8, bias=False)
-    
+
     def forward(self, x) -> Dict[str, torch.Tensor]:
         return {'tokens': self.cls_proj(x),
                 'curves': self.reg_proj(x)}
@@ -233,6 +235,7 @@ def party_adapter(num_layers: int,
     layers.append(nn.Linear(encoder_embed_dim, decoder_embed_dim))
     return nn.Sequential(*layers)
 
+
 class TsegModel(nn.Module):
     """
     The transformer segmentation fusion model.
@@ -256,20 +259,21 @@ class TsegModel(nn.Module):
 
         self.ready_for_generation = False
 
-
     @classmethod
-    def from_huggingface(cls, pretrained: str = 'mittagessen/llama_party') -> 'TsegModel':
+    def from_safetensors(cls, filename: Union[str, 'PathLike']) -> 'TsegModel':
         """
-        Loads a pretrained model from huggingface.
+        Loads model weights from a safetensors-based kraken serialization.
         """
         import timm
-        from huggingface_hub import hf_hub_download
-        with open(hf_hub_download(repo_id=pretrained, filename='config.json'), 'r') as fp:
-            config = json.load(fp)
+        from safetensors import safe_open
+
+        with safe_open(filename, framework='pt') as f:
+            metadata = f.metadata()
+            config = json.loads(metadata['config'])
             encoder_config = {k[8:]: v for k, v in config.items() if k.startswith('encoder_')}
             decoder_config = {k[8:]: v for k, v in config.items() if k.startswith('decoder_')}
 
-        decoder_config['vocab_size'] = 11
+            state_dict = {k: f.get_tensor(k) for k in f.keys()}
 
         # enable fused attn in encoder
         timm.layers.use_fused_attn(experimental=True)
@@ -281,22 +285,14 @@ class TsegModel(nn.Module):
                                           global_pool='')
 
         l_idx = encoder_model.prune_intermediate_layers(indices=(-2,), prune_head=True, prune_norm=True)[0]
-
-        decoder_model = bytellama_vision_decoder(**decoder_config)
+        decoder_model = baseline_decoder(**decoder_config)
 
         model = cls(encoder=encoder_model,
                     decoder=decoder_model,
                     encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
-                    decoder_embed_dim=decoder_model.tok_embeddings.out_features)
+                    decoder_embed_dim=decoder_model.tok_embeddings.embedding_dim)
 
-        weight_path = hf_hub_download(repo_id=pretrained, filename='model.safetensors')
-        from safetensors import safe_open
-        with safe_open(weight_path, framework='pt') as f:
-            state_dict = {k: f.get_tensor(k) for k in f.keys()}
-        # we reinitialize the embeddings
-        state_dict.pop('decoder.tok_embeddings.weight')
-        model.load_state_dict(state_dict, strict=False)
-
+        model.load_state_dict(state_dict)
         return model
 
     def setup_caches(self,
@@ -419,7 +415,7 @@ class TsegModel(nn.Module):
                                batch_size: int = 8,
                                max_encoder_seq_len: int = 19200,
                                max_generated_tokens: int = 768,
-                               device = 'cpu'):
+                               device: str = 'cpu'):
 
         if self.ready_for_generation:
             raise ValueError('Model has already been prepared for generation!')
@@ -443,7 +439,6 @@ class TsegModel(nn.Module):
         # create batch size number of BOS tokens
         self._prompt = torch.full((batch_size, 1), bos_id, device=device, dtype=torch.long)
         self.ready_for_generation = True
-
 
     @torch.inference_mode()
     def predict_tokens(self,
@@ -549,28 +544,3 @@ class TsegModel(nn.Module):
             generated_tokens *= eos_token_mask
 
             yield generated_tokens[:self._batch_size-pad_size, :-1]
-
-    @torch.inference_mode
-    def predict_string(self,
-                       encoder_input: torch.FloatTensor,
-                       curves: torch.FloatTensor,
-                       eos_id: int = 2) -> Generator[str, None, None]:
-        """
-        Predicts text from an input page image and a number of quadratic Bézier
-        curves.
-
-        Args:
-            encoder_input: Image input for the encoder with shape ``[1 x c x h x w]``
-            curves: Curves to be embedded and added to the encoder embeddings (``n x 4 x 2``)
-            batch_size: Number of curves to generate text for simultaneously.
-            eos_id: EOS ID of tokenizer
-
-        Yields:
-
-        """
-        tokenizer = OctetTokenizer()
-        for preds in self.predict_tokens(encoder_input=encoder_input,
-                                        curves=curves,
-                                        eos_id=eos_id):
-            for pred in preds:
-                yield tokenizer.decode(pred[pred != 0])

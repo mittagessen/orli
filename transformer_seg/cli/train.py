@@ -37,7 +37,8 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
 @click.command('train')
 @click.pass_context
 @click.option('--load-from-checkpoint', default=None, type=click.Path(exists=True), help='Path to checkpoint to load')
-@click.option('--load-from-hub', default=None, help='Identifier of model on huggingface hub, .e.g `mittagessen/llama_party`')
+@click.option('--load-from-repo', default=None, help='Identifier of model on huggingface hub, .e.g `10.5281/zenodo.14616981`')
+@click.option('--train-from-scratch', is_flag=True, show_default=True, default=False, help='Train model from scratch')
 @click.option('-B', '--batch-size', show_default=True, type=click.INT,
               default=SEGMENTATION_HYPER_PARAMS['batch_size'], help='batch sample size')
 @click.option('-o', '--output', show_default=True, type=click.Path(), default='model', help='Output model file')
@@ -140,20 +141,23 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               default=SEGMENTATION_HYPER_PARAMS['accumulate_grad_batches'],
               help='Number of batches to accumulate gradient across.')
 @click.argument('ground_truth', nargs=-1, callback=_expand_gt, type=click.Path(exists=False, dir_okay=False))
-def train(ctx, load_from_checkpoint, load_from_hub, batch_size, output, freq,
-          quit, epochs, min_epochs, freeze_encoder, lag, min_delta, optimizer,
-          lrate, momentum, weight_decay, gradient_clip_val, warmup, schedule,
-          gamma, step_size, sched_patience, cos_max, cos_min_lr,
-          training_files, evaluation_files, workers, threads, augment,
-          accumulate_grad_batches, ground_truth):
+def train(ctx, load_from_checkpoint, load_from_repo, train_from_scratch,
+          batch_size, output, freq, quit, epochs, min_epochs, freeze_encoder,
+          lag, min_delta, optimizer, lrate, momentum, weight_decay,
+          gradient_clip_val, warmup, schedule, gamma, step_size,
+          sched_patience, cos_max, cos_min_lr, training_files,
+          evaluation_files, workers, threads, augment, accumulate_grad_batches,
+          ground_truth):
     """
     Trains a model from image-text pairs.
     """
     if not (0 <= freq <= 1) and freq % 1.0 != 0:
         raise click.BadOptionUsage('freq', 'freq needs to be either in the interval [0,1.0] or a positive integer.')
 
-    if load_from_checkpoint and load_from_hub:
+    if load_from_checkpoint and load_from_repo:
         raise click.BadOptionsUsage('load_from_checkpoint', 'load_from_* options are mutually exclusive.')
+    elif load_from_checkpoint is None and load_from_repo is None:
+        load_from_repo = '10.5281/zenodo.14616981'
 
     if augment:
         try:
@@ -248,17 +252,17 @@ def train(ctx, load_from_checkpoint, load_from_hub, batch_size, output, freq,
                       **val_check_interval)
 
     with trainer.init_module():
-        if load_from_checkpoint:
+        if train_from_scratch:
+            message('Initializing new model.')
+            model = SegmentationModel(**hyper_params)
+        elif load_from_checkpoint:
             message(f'Loading from checkpoint {load_from_checkpoint}.')
             model = SegmentationModel.load_from_checkpoint(load_from_checkpoint,
                                                            **hyper_params)
-        elif load_from_hub:
-            message(f'Loading from huggingface hub {load_from_hub}.')
-            model = SegmentationModel.load_from_hub(hub_id=load_from_hub,
-                                                    **hyper_params)
-        else:
-            message('Initializing new model.')
-            model = SegmentationModel(**hyper_params)
+        elif load_from_repo:
+            message(f'Loading from huggingface hub {load_from_repo}.')
+            model = SegmentationModel.load_from_repo(load_from_repo,
+                                                     **hyper_params)
 
     with threadpool_limits(limits=threads):
         trainer.validate(model, data_module)

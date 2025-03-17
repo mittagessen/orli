@@ -70,7 +70,7 @@ class FusionLayer(nn.Module):
         """
         keys = list(state_dict.keys())
         for key in keys:
-            local_key = key[len(prefix) :]
+            local_key = key[len(prefix):]
             if local_key.startswith("layer"):
                 new_key = prefix + local_key.replace("layer.", "")
                 state_dict[new_key] = state_dict[key]
@@ -82,7 +82,7 @@ class FusionLayer(nn.Module):
         """
         keys = list(state_dict.keys())
         for key in keys:
-            local_key = key[len(prefix) :]
+            local_key = key[len(prefix):]
             if not local_key.startswith("fusion_layer"):
                 new_key = prefix + "layer." + local_key
                 state_dict[new_key] = state_dict[key]

@@ -45,8 +45,6 @@ logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = 20000 ** 2
 
 
-
-
 def get_default_transforms(dtype=torch.float32):
     return v2.Compose([v2.Resize((2560, 1920)),
                        v2.ToImage(),
@@ -115,7 +113,7 @@ class LineSegmentationDataModule(L.LightningDataModule):
 
         self.collator = partial(collate_curves,
                                 max_lines_in_page=min(max(self.train_set.max_lines_in_page,
-                                                           self.val_set.max_lines_in_page),
+                                                          self.val_set.max_lines_in_page),
                                                       self.train_set.max_lines_per_page))
 
     def train_dataloader(self):
