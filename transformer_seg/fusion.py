@@ -50,7 +50,8 @@ def baseline_decoder(vocab_size: int = 11,
                      rope_base: int = 10000,
                      encoder_max_seq_len: int = 4800,  # start of fusion parameters
                      fusion_interval: int = 1,
-                     pretrained: Optional[str] = None) -> TransformerDecoder:
+                     pretrained: Optional[str] = None,
+                     **kwargs) -> TransformerDecoder:
     """
     Builds a decoder regression baselines.
 
@@ -290,9 +291,9 @@ class TsegModel(nn.Module):
         model = cls(encoder=encoder_model,
                     decoder=decoder_model,
                     encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
-                    decoder_embed_dim=decoder_model.tok_embeddings.embedding_dim)
+                    decoder_embed_dim=decoder_model.tok_embeddings.out_features)
 
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
         return model
 
     def setup_caches(self,

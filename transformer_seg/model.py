@@ -84,6 +84,7 @@ class SegmentationModel(L.LightningModule):
                  encoder: str = 'swin_base_patch4_window12_384.ms_in22k',
                  encoder_input_size: Tuple[int, int] = (2560, 1920),
                  freeze_encoder: bool = False,
+                 pretrained: bool = False,
                  **kwargs):
         super().__init__()
 
@@ -95,7 +96,7 @@ class SegmentationModel(L.LightningModule):
         timm.layers.use_fused_attn(experimental=True)
 
         encoder_model = timm.create_model(encoder,
-                                          pretrained=False,
+                                          pretrained=pretrained,
                                           num_classes=0,
                                           img_size=encoder_input_size,
                                           global_pool='')
@@ -168,6 +169,17 @@ class SegmentationModel(L.LightningModule):
         module.model = TsegModel.from_safetensors(model_path)
         module.model.train()
         return module
+
+    @classmethod
+    def load_from_safetensors(cls, path=None, *args, **kwargs):
+        """
+        Loads weights from a (possibly partial) safetensors file.
+        """
+        module = cls(*args, **kwargs, pretrained=False)
+        module.model = TsegModel.from_safetensors(path)
+        module.model.train()
+        return module
+
 
     def configure_callbacks(self):
         callbacks = []
