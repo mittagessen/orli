@@ -24,7 +24,7 @@ from lightning.pytorch.callbacks import EarlyStopping
 from torch.optim import lr_scheduler
 from torchmetrics.aggregation import MeanMetric
 
-from typing import Literal, Tuple
+from typing import Literal, Tuple, Optional
 
 from transformer_seg.fusion import baseline_decoder, TsegModel
 
@@ -85,6 +85,7 @@ class SegmentationModel(L.LightningModule):
                  encoder_input_size: Tuple[int, int] = (2560, 1920),
                  freeze_encoder: bool = False,
                  pretrained: bool = False,
+                 from_safetensors: Optional[str] = None,
                  **kwargs):
         super().__init__()
 
@@ -95,21 +96,24 @@ class SegmentationModel(L.LightningModule):
         # enable fused attn in encoder
         timm.layers.use_fused_attn(experimental=True)
 
-        encoder_model = timm.create_model(encoder,
-                                          pretrained=pretrained,
-                                          num_classes=0,
-                                          img_size=encoder_input_size,
-                                          global_pool='')
+        if not from_safetensors:
+            encoder_model = timm.create_model(encoder,
+                                              pretrained=pretrained,
+                                              num_classes=0,
+                                              img_size=encoder_input_size,
+                                              global_pool='')
 
-        l_idx = encoder_model.prune_intermediate_layers(indices=(-2,), prune_head=True, prune_norm=True)[0]
-        l_red = encoder_model.feature_info[l_idx]['reduction']
+            l_idx = encoder_model.prune_intermediate_layers(indices=(-2,), prune_head=True, prune_norm=True)[0]
+            l_red = encoder_model.feature_info[l_idx]['reduction']
 
-        decoder_model = baseline_decoder(encoder_max_seq_len=encoder_input_size[0] // l_red * encoder_input_size[1] // l_red)
+            decoder_model = baseline_decoder(encoder_max_seq_len=encoder_input_size[0] // l_red * encoder_input_size[1] // l_red)
 
-        self.model = TsegModel(encoder=encoder_model,
-                               decoder=decoder_model,
-                               encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
-                               decoder_embed_dim=decoder_model.tok_embeddings.out_features)
+            self.model = TsegModel(encoder=encoder_model,
+                                   decoder=decoder_model,
+                                   encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
+                                   decoder_embed_dim=decoder_model.tok_embeddings.out_features)
+        else:
+            self.model = TsegModel.from_safetensors(from_safetensors)
 
         if freeze_encoder:
             for param in self.model.encoder.parameters():
@@ -175,10 +179,7 @@ class SegmentationModel(L.LightningModule):
         """
         Loads weights from a (possibly partial) safetensors file.
         """
-        module = cls(*args, **kwargs, pretrained=False)
-        module.model = TsegModel.from_safetensors(path)
-        module.model.train()
-        return module
+        return cls(*args, **kwargs, pretrained=False, from_safetensors=path)
 
 
     def configure_callbacks(self):
