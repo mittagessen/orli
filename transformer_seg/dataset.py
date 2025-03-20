@@ -215,6 +215,8 @@ class BaselineSegmentationDataset(Dataset):
         lines.append(8 * [-1.])
         lines.insert(0, 8 * [0])
         lines = torch.tensor(lines)
+        if self.aug:
+            torch.rand_like(lines) * 0.001
         # one-hot encode cls here so we can embed curves and classes with a
         # single linear projection.
         line_cls = torch.full((len(lines),), self.line_token_id-1, dtype=torch.long)
