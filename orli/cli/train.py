@@ -141,6 +141,7 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               show_default=True,
               default=SEGMENTATION_HYPER_PARAMS['accumulate_grad_batches'],
               help='Number of batches to accumulate gradient across.')
+@click.option('--validate-before-train/--no-validate-before-train', show_default=True, default=True, help='Enables validation run before first training run.')
 @click.argument('ground_truth', nargs=-1, callback=_expand_gt, type=click.Path(exists=False, dir_okay=False))
 def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
           train_from_scratch, batch_size, output, freq, quit, epochs,
@@ -148,7 +149,7 @@ def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
           momentum, weight_decay, gradient_clip_val, warmup, schedule, gamma,
           step_size, sched_patience, cos_max, cos_min_lr, training_files,
           evaluation_files, workers, threads, augment, accumulate_grad_batches,
-          ground_truth):
+          validate_before_train, ground_truth):
     """
     Trains a model from image-text pairs.
     """
@@ -272,7 +273,8 @@ def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
 
 
     with threadpool_limits(limits=threads):
-        trainer.validate(model, data_module)
+        if validate_before_train:
+            trainer.validate(model, data_module)
         trainer.fit(model, data_module)
 
     if model.best_epoch == -1:
