@@ -412,17 +412,18 @@ class OrliModel(nn.Module):
 
     @torch.inference_mode()
     def prepare_for_generation(self,
-                               bos_id: int = 1,
-                               batch_size: int = 8,
+                               bos_id: torch.Tensor = torch.Tensor([1]).long(),
+                               batch_size: int = 1,
                                max_encoder_seq_len: int = 19200,
                                max_generated_tokens: int = 768,
-                               device: str = 'cpu'):
+                               device: torch.device = torch.device('cpu')):
 
         if self.ready_for_generation:
             raise ValueError('Model has already been prepared for generation!')
 
         self._batch_size = batch_size
         self._max_generated_tokens = max_generated_tokens
+        self._max_encoder_seq_len = max_encoder_seq_len
 
         # generate a regular causal mask
         self._masks = torch.tril(torch.ones(max_generated_tokens,
@@ -438,110 +439,90 @@ class OrliModel(nn.Module):
                           dtype=next(self.encoder.parameters()).dtype)
 
         # create batch size number of BOS tokens
-        self._prompt = torch.full((batch_size, 1), bos_id, device=device, dtype=torch.long)
+        self._prompt = F.one_hot(bos_id-1, num_classes=11).to(device=device, dtype=torch.float).repeat(batch_size, 1)
         self.ready_for_generation = True
 
     @torch.inference_mode()
-    def predict_tokens(self,
+    def predict_curves(self,
                        encoder_input: torch.FloatTensor,
-                       curves: torch.FloatTensor,
                        eos_id: int = 2) -> Generator[torch.Tensor, None, None]:
         """
         Predicts text from an input page image and a number of quadratic Bézier
         curves.
 
         Args:
-            encoder_input: Image input for the encoder with shape ``1 x c x h x w``
-            curves: Curves to be embedded and added to the encoder embeddings (``n x 4 x 2``)
-            batch_size: Number of curves to generate text for simultaneously.
+            encoder_input: Image input for the encoder with shape ``n x c x h x w``
             eos_id: EOS ID of tokenizer
 
         Yields:
-            A tensor of integer labels with shape ``n x s`` where ``s` is the
+            A tensor of integer labels with shape ``n x s x 11`` where ``s` is the
             length of the longest generated sequence or `max_generated_tokens`.
             BOS and EOS have already been stripped from the token sequences.
             Entries beyond the EOS are padded with zeroes.
         """
         logger.info('Computing encoder embeddings')
 
-        encoder_hidden_states = self.forward_encoder_embeddings(encoder_input).repeat(self._batch_size, 1, 1)
+        encoder_hidden_states = self.forward_encoder_embeddings(encoder_input)
 
-        eos_token = torch.tensor(eos_id, device=curves.device, dtype=torch.long)
-
-        batches = torch.split(curves, self._batch_size)
+        eos_token = torch.tensor(eos_id-1, device=encoder_hidden_states.device, dtype=torch.long)
 
         # Mask is shape (batch_size, max_seq_len, image_embedding_len)
-        encoder_mask = torch.ones((self._batch_size,
+        encoder_mask = torch.ones((encoder_hidden_states.size(0),
                                    1,
                                    encoder_hidden_states.size(1)),
                                   dtype=torch.bool,
-                                  device=curves.device)
+                                  device=encoder_input.device)
 
-        for batch_idx, batch in enumerate(batches):
-            # pad batch to full size if last batch is incomplete
-            pad_size = 0
-            if batch.size(0) != self._batch_size:
-                pad_size = self._batch_size - batch.size(0)
-                batch = F.pad(batch, (0, 0, 0, 0, 0, pad_size))
+        # prefill step
+        curr_masks = self._masks[:, :1]
+        logits = self.forward(tokens=self._prompt,
+                              encoder_hidden_states=encoder_hidden_states,
+                              encoder_mask=encoder_mask,
+                              mask=curr_masks,
+                              input_pos=self._input_pos[:, :1].squeeze())
+        tokens = torch.argmax(logits['tokens'], dim=-1)
+        curves = logits['curves']
+        generated_tokens = [tokens[:, -1]]
+        generated_curves = [curves[:, -1]]
 
-            self.reset_caches()
+        curr_pos = 1
 
-            logger.info(f'Processing batch {batch_idx} of {len(batches)}')
+        # keeps track of EOS tokens emitted by each sequence in a batch
+        eos_token_reached = torch.zeros(self._batch_size, dtype=torch.bool, device=encoder_input.device)
+        eos_token_reached |= tokens[:, -1] == eos_token
 
-            # add curve embeddings to encoder hidden states
-            curve_embeds = self.curve_embedding(batch).unsqueeze(1).expand(-1, encoder_hidden_states.size(1), -1)
-            exp_encoder_hidden_states = encoder_hidden_states + curve_embeds
+        # mask used for setting all values from EOS token to pad_id in output sequences.
+        eos_token_mask = torch.ones(self._batch_size, 0, dtype=torch.int32, device=curves.device)
 
-            # prefill step
-            curr_masks = self._masks[:, :1]
-            logits = self.forward(tokens=self._prompt,
-                                  encoder_hidden_states=exp_encoder_hidden_states,
-                                  encoder_mask=encoder_mask[:self._batch_size, ...],
+        for _ in range(self._max_generated_tokens - 1):
+            # update eos_token_mask if an EOS token was emitted in a previous step
+            eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
+
+            curr_input_pos = self._input_pos[:, curr_pos]
+            curr_masks = self._masks[:, curr_pos, None, :]
+
+            # no need for encoder embeddings anymore as they're in the cache now
+            logits = self.forward(tokens=torch.cat([F.onehot(tokens, num_classes=3).to(device=encoder_hidden_states.device),
+                                                    curves], dim=-1),
                                   mask=curr_masks,
-                                  input_pos=self._input_pos[:, :1].squeeze())
-            tokens = torch.argmax(logits, dim=-1)
-            generated_tokens = [tokens[:, -1]]
+                                  input_pos=curr_input_pos)
+            tokens = torch.argmax(logits['tokens'], dim=-1)
+            curves = logits['curves']
+            logger.info(f'Generated {tokens[:, -1]}')
+            generated_tokens.append(tokens[:, -1])
+            generated_curves.append(tokens[:, -1])
 
-            curr_pos = 1
+            curr_pos += 1
 
-            # keeps track of EOS tokens emitted by each sequence in a batch
-            eos_token_reached = torch.zeros(self._batch_size, dtype=torch.bool, device=curves.device)
             eos_token_reached |= tokens[:, -1] == eos_token
-
-            # mask used for setting all values from EOS token to pad_id in output sequences.
-            eos_token_mask = torch.ones(self._batch_size, 0, dtype=torch.int32, device=curves.device)
-
-            # set padding sequences to empty
-            if pad_size:
-                eos_token_reached[-pad_size:] = True
-
             if eos_token_reached.all():
                 break
 
-            for _ in range(self._max_generated_tokens - 1):
-                # update eos_token_mask if an EOS token was emitted in a previous step
-                eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
+        eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
+        eos_curve_mask = eos_token_mask.repeat(-1, 11)
 
-                curr_input_pos = self._input_pos[:, curr_pos]
-                curr_masks = self._masks[:, curr_pos, None, :]
+        # mask out generated curves beyond EOS token
+        generated_curves = torch.stack(generated_curves).T
+        generated_curves *= eos_curve_mask
 
-                # no need for encoder embeddings anymore as they're in the cache now
-                logits = self.forward(tokens=tokens.clone(),
-                                      mask=curr_masks,
-                                      input_pos=curr_input_pos)
-                tokens = torch.argmax(logits, dim=-1)
-                logger.info(f'Generated {tokens[:, -1]}')
-                generated_tokens.append(tokens[:, -1])
-                curr_pos += 1
-
-                eos_token_reached |= tokens[:, -1] == eos_token
-                if eos_token_reached.all():
-                    break
-
-            eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
-
-            # mask out generated tokens beyond EOS token
-            generated_tokens = torch.stack(generated_tokens).T
-            generated_tokens *= eos_token_mask
-
-            yield generated_tokens[:self._batch_size-pad_size, :-1]
+        return generated_curves[:, :-1]
