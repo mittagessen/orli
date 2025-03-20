@@ -23,19 +23,19 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from transformer_seg.modules import (MultiHeadAttention, RMSNorm, TanhGate,
-                                     TransformerCrossAttentionLayer,
-                                     TransformerDecoder, FeedForward,
-                                     TransformerSelfAttentionLayer,
-                                     FusionLayer, scale_hidden_dim_for_mlp,
-                                     Llama3ScaledRoPE, llama3_mlp)
+from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
+                          TransformerCrossAttentionLayer,
+                          TransformerDecoder, FeedForward,
+                          TransformerSelfAttentionLayer,
+                          FusionLayer, scale_hidden_dim_for_mlp,
+                          Llama3ScaledRoPE, llama3_mlp)
 
 if TYPE_CHECKING:
     from os import PathLike
 
 logger = logging.getLogger(__name__)
 
-__all__ = ['baseline_decoder', 'TsegModel']
+__all__ = ['baseline_decoder', 'OrliModel']
 
 
 def baseline_decoder(vocab_size: int = 11,
@@ -237,7 +237,7 @@ def party_adapter(num_layers: int,
     return nn.Sequential(*layers)
 
 
-class TsegModel(nn.Module):
+class OrliModel(nn.Module):
     """
     The transformer segmentation fusion model.
 
@@ -261,7 +261,7 @@ class TsegModel(nn.Module):
         self.ready_for_generation = False
 
     @classmethod
-    def from_safetensors(cls, filename: Union[str, 'PathLike']) -> 'TsegModel':
+    def from_safetensors(cls, filename: Union[str, 'PathLike']) -> 'OrliModel':
         """
         Loads model weights from a safetensors-based kraken serialization.
         """

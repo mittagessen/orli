@@ -13,7 +13,7 @@
 # or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 """
-transformer_seg.cli.train
+orli.cli.train
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Command line driver for recognition training.
@@ -23,12 +23,12 @@ import logging
 import click
 from threadpoolctl import threadpool_limits
 
-from transformer_seg.default_specs import SEGMENTATION_HYPER_PARAMS
+from orli.default_specs import SEGMENTATION_HYPER_PARAMS
 
 from .util import _expand_gt, _validate_manifests, message, to_ptl_device
 
 logging.captureWarnings(True)
-logger = logging.getLogger('transformer_seg')
+logger = logging.getLogger('orli')
 
 # suppress worker seeding message
 logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
@@ -168,8 +168,8 @@ def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
 
     import torch
 
-    from transformer_seg.dataset import LineSegmentationDataModule
-    from transformer_seg.model import SegmentationModel
+    from orli.dataset import LineSegmentationDataModule
+    from orli.model import SegmentationModel
 
     from lightning.pytorch import Trainer
     from lightning.pytorch.callbacks import RichModelSummary, ModelCheckpoint, RichProgressBar

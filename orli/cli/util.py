@@ -13,7 +13,7 @@
 # or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 """
-transformer_seg.cli.util
+orli.cli.util
 ~~~~~~~~~~~~~~~~~~~~
 
 Command line driver helpers
@@ -30,7 +30,7 @@ from lightning.pytorch.callbacks import BaseFinetuning
 
 
 logging.captureWarnings(True)
-logger = logging.getLogger('transformer_seg')
+logger = logging.getLogger('orli')
 
 
 def _validate_manifests(ctx, param, value):

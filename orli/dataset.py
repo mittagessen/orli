@@ -183,7 +183,7 @@ class BaselineSegmentationDataset(Dataset):
                     self.arrow_table = pa.concat_tables([self.arrow_table, ds_table])
 
         if augmentation:
-            from transformer_seg.augmentation import DefaultAugmenter
+            from orli.augmentation import DefaultAugmenter
             self.aug = DefaultAugmenter()
 
     def __getitem__(self, index: int):
