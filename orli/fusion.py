@@ -437,9 +437,9 @@ class OrliModel(nn.Module):
         self.ready_for_generation = True
 
     @torch.inference_mode()
-    def predict_curves(self,
-                       encoder_input: torch.FloatTensor,
-                       eos_id: int = 2) -> Generator[torch.Tensor, None, None]:
+    def predict(self,
+                encoder_input: torch.FloatTensor,
+                eos_id: int = 2) -> Generator[torch.Tensor, None, None]:
         """
         Predicts text from an input page image and a number of quadratic Bézier
         curves.

@@ -90,7 +90,7 @@ def segment(ctx, input, batch_input, suffix, load_from_repo, load_from_file,
 
     from threadpoolctl import threadpool_limits
 
-    from orli.pred import segment
+    from orli.pred import segment as segment_
     from orli.fusion import OrliModel
 
     try:
@@ -154,7 +154,7 @@ def segment(ctx, input, batch_input, suffix, load_from_repo, load_from_file,
                 imagename = get_input_parser(ctx.meta['input_format_type'])(input).imagename
 
                 im = Image.open(imagename)
-                res = segment(model=model, im=im, fabric=fabric)
+                res = segment_(model=model, im=im, fabric=fabric)
                 with click.open_file(output_file, 'w', encoding='utf-8') as fp:
                     logger.info(f'Serializing as {serializer} into {output_file}')
                     from kraken import serialization
