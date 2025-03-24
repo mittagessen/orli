@@ -212,10 +212,10 @@ class BaselineSegmentationDataset(Dataset):
         lines = torch.tensor(lines)
         # one-hot encode cls here so we can embed curves and classes with a
         # single linear projection.
-        line_cls = torch.full((len(lines),), self.line_token_id-1, dtype=torch.long)
-        line_cls[0] = self.bos_token_id-1
-        line_cls[-1] = self.eos_token_id-1
-        line_cls = F.one_hot(line_cls, num_classes=3).float()
+        line_cls = torch.full((len(lines),), self.line_token_id, dtype=torch.long)
+        line_cls[0] = self.bos_token_id
+        line_cls[-1] = self.eos_token_id
+        line_cls = F.one_hot(line_cls, num_classes=4).float()
 
         if self.aug:
             im = im.permute((1, 2, 0)).numpy()

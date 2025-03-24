@@ -180,7 +180,7 @@ class CurveHead(nn.Module):
     """
     def __init__(self,
                  embed_dim: int = 576,
-                 num_cls: int = 3):
+                 num_cls: int = 4):
         super().__init__()
         self.cls_proj = nn.Linear(embed_dim, num_cls, bias=False)
         self.reg_proj = nn.Linear(embed_dim, 8, bias=False)
@@ -433,7 +433,7 @@ class OrliModel(nn.Module):
                           dtype=next(self.encoder.parameters()).dtype)
 
         # create batch size number of BOS tokens
-        self._prompt = F.one_hot(bos_id-1, num_classes=11).to(device=device, dtype=torch.float).repeat(batch_size, 1)
+        self._prompt = F.one_hot(bos_id-1, num_classes=11).to(device=device, dtype=torch.float).unsqueeze(0).repeat(batch_size, 1, 1)
         self.ready_for_generation = True
 
     @torch.inference_mode()
@@ -458,7 +458,7 @@ class OrliModel(nn.Module):
 
         encoder_hidden_states = self.forward_encoder_embeddings(encoder_input)
 
-        eos_token = torch.tensor(eos_id-1, device=encoder_hidden_states.device, dtype=torch.long)
+        eos_token = torch.tensor(eos_id, device=encoder_hidden_states.device, dtype=torch.long)
 
         # Mask is shape (batch_size, max_seq_len, image_embedding_len)
         encoder_mask = torch.ones((encoder_hidden_states.size(0),
@@ -466,7 +466,6 @@ class OrliModel(nn.Module):
                                    encoder_hidden_states.size(1)),
                                   dtype=torch.bool,
                                   device=encoder_input.device)
-
         # prefill step
         curr_masks = self._masks[:, :1]
         logits = self.forward(tokens=self._prompt,
@@ -496,15 +495,15 @@ class OrliModel(nn.Module):
             curr_masks = self._masks[:, curr_pos, None, :]
 
             # no need for encoder embeddings anymore as they're in the cache now
-            logits = self.forward(tokens=torch.cat([F.onehot(tokens, num_classes=3).to(device=encoder_hidden_states.device),
+            logits = self.forward(tokens=torch.cat([F.one_hot(tokens, num_classes=4).to(device=encoder_hidden_states.device),
                                                     curves], dim=-1),
                                   mask=curr_masks,
                                   input_pos=curr_input_pos)
             tokens = torch.argmax(logits['tokens'], dim=-1)
             curves = logits['curves']
-            logger.info(f'Generated {tokens[:, -1]}')
+            print(f'Generated tokens: {tokens} Generated curves: {curves}')
             generated_tokens.append(tokens[:, -1])
-            generated_curves.append(tokens[:, -1])
+            generated_curves.append(curves[:, -1])
 
             curr_pos += 1
 
@@ -513,7 +512,7 @@ class OrliModel(nn.Module):
                 break
 
         eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
-        eos_curve_mask = eos_token_mask.repeat(-1, 11)
+        eos_curve_mask = eos_token_mask.repeat(1, 11)
 
         # mask out generated curves beyond EOS token
         generated_curves = torch.stack(generated_curves).T
