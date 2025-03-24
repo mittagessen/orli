@@ -14,7 +14,7 @@
 # permissions and limitations under the License.
 """
 orli.cli.util
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~
 
 Command line driver helpers
 """
@@ -31,6 +31,14 @@ from lightning.pytorch.callbacks import BaseFinetuning
 
 logging.captureWarnings(True)
 logger = logging.getLogger('orli')
+
+
+def get_input_parser(type_str: str) -> Callable[[str], Dict[str, Any]]:
+    if type_str in ['alto', 'page', 'xml']:
+        from kraken.lib.xml import XMLPage
+        return XMLPage
+    elif type_str == 'image':
+        return Image.open
 
 
 def _validate_manifests(ctx, param, value):
@@ -73,39 +81,3 @@ def to_ptl_device(device: str) -> Tuple[str, Optional[List[int]]]:
             dev = 'gpu'
         return dev, [int(x[1]) for x in devices]
     raise Exception(f'Invalid device {device} specified')
-
-
-class FreezeEncoder(BaseFinetuning):
-    """
-    Callback freezing the encoder for a fixed number of iterations.
-    """
-
-    def __init__(self, unfreeze_at_iterations=10):
-        super().__init__()
-        self.unfreeze_at_iteration = unfreeze_at_iterations
-
-    def freeze_before_training(self, pl_module):
-        pass
-
-    def finetune_function(self, pl_module, current_epoch, optimizer):
-        pass
-
-    def on_train_start(self, trainer: "L.Trainer", pl_module: "L.LightningModule") -> None:
-        self.freeze(pl_module.nn['encoder'])
-
-    def on_train_batch_start(self, trainer: "L.Trainer", pl_module: "L.LightningModule", batch, batch_idx) -> None:
-        """
-        Called for each training batch.
-        """
-        if trainer.global_step == self.unfreeze_at_iteration:
-            for opt_idx, optimizer in enumerate(trainer.optimizers):
-                num_param_groups = len(optimizer.param_groups)
-                self.unfreeze_and_add_param_group(modules=pl_module.nn['encoder'],
-                                                  optimizer=optimizer,
-                                                  train_bn=True,)
-                current_param_groups = optimizer.param_groups
-                self._store(pl_module, opt_idx, num_param_groups, current_param_groups)
-
-    def on_train_epoch_start(self, trainer: "L.Trainer", pl_module: "L.LightningModule") -> None:
-        """Called when the epoch begins."""
-        pass
