@@ -26,7 +26,7 @@ from torchmetrics.aggregation import MeanMetric
 
 from typing import Literal, Tuple, Optional
 
-from orli.fusion import baseline_decoder, OrliModel 
+from orli.fusion import baseline_decoder, OrliModel
 
 
 logger = logging.getLogger(__name__)
@@ -165,8 +165,6 @@ class SegmentationModel(L.LightningModule):
         Loads weights from the HTRMoPo repository.
         """
         from htrmopo import get_model
-
-        module = cls(*args, **kwargs, pretrained=False)
 
         model_path = get_model(id) / 'model.safetensors'
 
