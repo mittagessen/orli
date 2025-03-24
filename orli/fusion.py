@@ -187,7 +187,7 @@ class CurveHead(nn.Module):
 
     def forward(self, x) -> Dict[str, torch.Tensor]:
         return {'tokens': self.cls_proj(x),
-                'curves': self.reg_proj(x)}
+                'curves': self.reg_proj(x).sigmoid()}
 
 
 def party_adapter(num_layers: int,
