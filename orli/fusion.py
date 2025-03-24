@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 __all__ = ['baseline_decoder', 'OrliModel']
 
 
-def baseline_decoder(vocab_size: int = 11,
+def baseline_decoder(vocab_size: int = 12,
                      num_layers: int = 4,
                      num_heads: int = 9,
                      num_kv_heads: int = 3,
@@ -433,7 +433,7 @@ class OrliModel(nn.Module):
                           dtype=next(self.encoder.parameters()).dtype)
 
         # create batch size number of BOS tokens
-        self._prompt = F.one_hot(bos_id-1, num_classes=11).to(device=device, dtype=torch.float).unsqueeze(0).repeat(batch_size, 1, 1)
+        self._prompt = F.one_hot(bos_id-1, num_classes=12).to(device=device, dtype=torch.float).unsqueeze(0).repeat(batch_size, 1, 1)
         self.ready_for_generation = True
 
     @torch.inference_mode()
@@ -449,7 +449,7 @@ class OrliModel(nn.Module):
             eos_id: EOS ID of tokenizer
 
         Yields:
-            A tensor of integer labels with shape ``n x s x 11`` where ``s` is the
+            A tensor of integer labels with shape ``n x s x 12`` where ``s` is the
             length of the longest generated sequence or `max_generated_tokens`.
             BOS and EOS have already been stripped from the token sequences.
             Entries beyond the EOS are padded with zeroes.
@@ -512,7 +512,7 @@ class OrliModel(nn.Module):
                 break
 
         eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
-        eos_curve_mask = eos_token_mask.repeat(1, 11)
+        eos_curve_mask = eos_token_mask.repeat(1, 12)
 
         # mask out generated curves beyond EOS token
         generated_curves = torch.stack(generated_curves).T

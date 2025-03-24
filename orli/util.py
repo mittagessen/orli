@@ -33,7 +33,7 @@ def checkpoint_to_kraken(checkpoint_path: Union[str, 'PathLike'],
     """
     state_dict = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=True)
     # we do not have configurable encoders/decoders
-    config = {"decoder_vocab_size": 11,
+    config = {"decoder_vocab_size": 12,
               "decoder_num_layers": 4,
               "decoder_num_heads": 9,
               "decoder_num_kv_heads": 3,
