@@ -441,18 +441,20 @@ class OrliModel(nn.Module):
                 encoder_input: torch.FloatTensor,
                 eos_id: int = 2) -> Generator[torch.Tensor, None, None]:
         """
-        Predicts text from an input page image and a number of quadratic Bézier
+        Predicts text from an input page image and a number of cubic Bézier
         curves.
 
         Args:
             encoder_input: Image input for the encoder with shape ``n x c x h x w``
             eos_id: EOS ID of tokenizer
 
-        Yields:
-            A tensor of integer labels with shape ``n x s x 12`` where ``s` is the
-            length of the longest generated sequence or `max_generated_tokens`.
-            BOS and EOS have already been stripped from the token sequences.
-            Entries beyond the EOS are padded with zeroes.
+        Returns:
+            A float tensor of with shape ``n x s x 8`` where ``n`` is the batch
+            size, ``s`` is the maximum number of curves detected, and the last
+            dimension is an 8-tuple defining the control points of a cubic 
+            Bézier curve. No-output is indicated by zeroed output control
+            points. If s < max_generated_tokens the last entry across all batch
+            items will be a no-output.
         """
         logger.info('Computing encoder embeddings')
 
@@ -501,21 +503,17 @@ class OrliModel(nn.Module):
                                   input_pos=curr_input_pos)
             tokens = torch.argmax(logits['tokens'], dim=-1)
             curves = logits['curves']
-            print(f'Generated tokens: {tokens} Generated curves: {curves}')
             generated_tokens.append(tokens[:, -1])
             generated_curves.append(curves[:, -1])
 
             curr_pos += 1
 
             eos_token_reached |= tokens[:, -1] == eos_token
+            logger.info(f'Generated tokens: {tokens} Generated curves: {curves}')
+
             if eos_token_reached.all():
                 break
 
         eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
-        eos_curve_mask = eos_token_mask.repeat(1, 12)
-
-        # mask out generated curves beyond EOS token
-        generated_curves = torch.stack(generated_curves).T
-        generated_curves *= eos_curve_mask
-
-        return generated_curves[:, :-1]
+        eos_curve_mask = eos_token_mask.expand(8, -1, -1).permute(1, 2, 0)
+        return torch.stack(generated_curves, dim=1) * eos_curve_mask

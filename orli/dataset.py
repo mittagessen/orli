@@ -80,7 +80,6 @@ class LineSegmentationDataModule(L.LightningDataModule):
                  num_workers: int = 8):
         super().__init__()
 
-        self.pad_token_id = 0
         self.bos_token_id = 1
         self.eos_token_id = 2
         self.line_token_id = 3
@@ -95,7 +94,6 @@ class LineSegmentationDataModule(L.LightningDataModule):
         self.train_set = BaselineSegmentationDataset(self.hparams.training_data,
                                                      im_transforms=self.im_transforms,
                                                      augmentation=self.hparams.augmentation,
-                                                     pad_token_id=self.pad_token_id,
                                                      bos_token_id=self.bos_token_id,
                                                      eos_token_id=self.eos_token_id,
                                                      line_token_id=self.line_token_id)
@@ -103,7 +101,6 @@ class LineSegmentationDataModule(L.LightningDataModule):
         self.val_set = BaselineSegmentationDataset(self.hparams.evaluation_data,
                                                    im_transforms=self.im_transforms,
                                                    augmentation=False,
-                                                   pad_token_id=self.pad_token_id,
                                                    bos_token_id=self.bos_token_id,
                                                    eos_token_id=self.eos_token_id,
                                                    line_token_id=self.line_token_id)
@@ -151,7 +148,6 @@ class BaselineSegmentationDataset(Dataset):
                  im_transforms=None,
                  augmentation: bool = False,
                  max_lines_per_page: int = 768,
-                 pad_token_id: int = 0,
                  bos_token_id: int = 1,
                  eos_token_id: int = 2,
                  line_token_id: int = 3) -> None:
@@ -161,7 +157,6 @@ class BaselineSegmentationDataset(Dataset):
         self.arrow_table = None
         self.max_lines_in_page = 0
         self.max_lines_per_page = max_lines_per_page
-        self.pad_token_id = pad_token_id
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.line_token_id = line_token_id

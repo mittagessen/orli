@@ -20,12 +20,13 @@ API for inference
 """
 import torch
 import logging
+import numpy as np
 
 from dataclasses import asdict
 
 from kraken.containers import Segmentation, BaselineLine
 
-from typing import TYPE_CHECKING, Union, Tuple, Optional, Literal, Generator
+from typing import TYPE_CHECKING, Union, Tuple, Optional, Literal, Generator, List
 
 from orli.dataset import get_default_transforms
 
@@ -42,8 +43,13 @@ if TYPE_CHECKING:
 __all__ = ['batched_pred']
 
 
-def sample_curves():
-    pass
+def sample_curves(curves: torch.Tensor) -> List[List[Tuple[int, int]]]:
+    samples = np.linspace(0, 1, 20)
+    coeff = BezierCoeff(samples))
+    for curve in curves:
+        curve = np.array(curves)
+        curve.resize(4, 2)
+        coeff.dot(curve)
 
 
 def segment(model: 'OrliModel',
@@ -55,27 +61,15 @@ def segment(model: 'OrliModel',
     Args:
         model: OrliModel for generation.
         im: Pillow image
-        bounds: Segmentation for input image
         fabric: Fabric context manager to cast models and tensors.
-        prompt_mode: How to embed line positional prompts. Per default prompts
-                     are determined by the segmentation type if the model
-                     indicates either curves or boxes are supported. If the
-                     model supports only boxes and the input segmentation is
-                     baseline-type, bounding boxes will be generated from the
-                     bounding polygon if available. If the model expects curves
-                     and the segmentation is of bounding box-type an exception
-                     will be raised. If explicit values are set.
-        batch_size: Number of lines to predict in parallel
 
-    Yields:
-        An ocr_record containing the recognized text, dummy character
-        positions, and confidence values for each character.
-
-    Raises:
-        ValueError when the model expects curves and the segmentation of bounding box-type.
+    Returns: 
+        A Segmentation object 
     """
     m_dtype = next(model.parameters()).dtype
     m_device = next(model.parameters()).device
+
+    curve_scale = torch.tensor(im.size * 4)
 
     # load image transforms
     im_transforms = get_default_transforms(dtype=m_dtype)
@@ -86,4 +80,9 @@ def segment(model: 'OrliModel',
 
     with fabric.init_tensor(), torch.inference_mode():
         image_input = im_transforms(im).unsqueeze(0).to(m_device)
-        curves = model.predict(encoder_input=image_input)
+        curves = model.predict(encoder_input=image_input).squeeze()
+        # strip trailing no-op if it is there.
+        if not curves[-1].any():
+            curves = curves[:-1]
+        curves *= curve_scale
+    lines = sample_curve(curves)

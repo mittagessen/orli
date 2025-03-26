@@ -6,7 +6,7 @@ performing the text line detection and reading order determination subtasks.
 Orli consists of a Swin vision transformer encoder (shared with
 [party](https://github.com/mittagessen/party)) and a small transformer decoder. 
 The autoregressive decoder predicts baselines by regressing the normalized
-coordinates of the control points of a quadratic Bézier curve.
+coordinates of the control points of a cubic Bézier curve.
 
 ## Installation
 
