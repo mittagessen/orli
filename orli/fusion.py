@@ -190,7 +190,7 @@ class EncoderFusion(nn.Module):
         self.in_channels = in_channels
         self.fusion_embed_dim = fusion_embed_dim // len(in_channels)
 
-        head_dim = fusion_embed_dim // num_heads
+        head_dim = self.fusion_embed_dim // num_heads
         num_kv_heads = num_heads
 
         rope = Llama3ScaledRoPE(dim=head_dim, max_seq_len=max_seq_len, base=rope_base)
