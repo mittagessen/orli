@@ -21,11 +21,12 @@ Command line driver helpers
 import glob
 import logging
 import os
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Callable, Dict, Any
 
 import click
 import lightning as L
 
+from PIL import Image
 from lightning.pytorch.callbacks import BaseFinetuning
 
 
