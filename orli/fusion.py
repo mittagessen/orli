@@ -428,8 +428,7 @@ class OrliModel(nn.Module):
         """
         encoder_hidden_states = self.encoder(encoder_input)
         b, e = encoder_hidden_states.shape[0], encoder_hidden_states.shape[-1]
-        encoder_hidden_states = encoder_hidden_states.view(b, -1, e)
-        return self.adapter(encoder_hidden_states)
+        return encoder_hidden_states.view(b, -1, e)
 
     @torch.inference_mode()
     def prepare_for_generation(self,
