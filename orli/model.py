@@ -57,9 +57,9 @@ def model_step(model,
 
     logits = model(tokens=torch.cat([tokens, curves], dim=-1), encoder_input=batch['image'])
 
-    pred_tokens = logits['tokens'][target_tokens != -1].view(-1, 3)
+    pred_tokens = logits['tokens'][target_tokens != -1].view(-1, 4)
     pred_curves = logits['curves'].view(-1)[target_curves != -1]
-    return 2 * cls_criterion(pred_tokens, target_tokens[target_tokens != -1].view(-1, 3)) + 5 * curve_criterion(pred_curves, target_curves[target_curves != -1])
+    return 2 * cls_criterion(pred_tokens, target_tokens[target_tokens != -1].view(-1, 4)) + 5 * curve_criterion(pred_curves, target_curves[target_curves != -1])
 
 
 class SegmentationModel(L.LightningModule):
