@@ -244,7 +244,7 @@ class EncoderFusion(nn.Module):
         features = proj_features[0]
         for idx, conv in enumerate(self.downsampling_convs):
             features = torch.cat([conv(features), proj_features[idx+1]], dim=1)
-        return features.flatten(-2).tranpose(1, 2)
+        return features.flatten(-2).transpose(1, 2)
 
 
 class CurveHead(nn.Module):
