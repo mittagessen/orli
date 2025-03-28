@@ -174,6 +174,79 @@ def baseline_decoder(vocab_size: int = 12,
     return decoder
 
 
+class EncoderFusion(nn.Module):
+    """
+    Fuses encoder feature pyramids
+    """
+    def __init__(self,
+                 in_channels: List[int],
+                 in_strides: List[int],
+                 fusion_embed_dim: int = 512,
+                 intermediate_dim: int = 1536,
+                 rope_base: int = 10000,
+                 max_seq_len: int = 19200,
+                 num_heads: int = 8):
+        super().__init__()
+        self.in_channels = in_channels
+        self.fusion_embed_dim = fusion_embed_dim // len(in_channels)
+
+        head_dim = fusion_embed_dim // num_heads
+        num_kv_heads = num_heads
+
+        rope = Llama3ScaledRoPE(dim=head_dim, max_seq_len=max_seq_len, base=rope_base)
+
+        self_attn = MultiHeadAttention(embed_dim=self.fusion_embed_dim,
+                                       num_heads=num_heads,
+                                       num_kv_heads=num_heads,
+                                       head_dim=head_dim,
+                                       q_proj=nn.Linear(self.fusion_embed_dim, num_heads * head_dim, bias=False),
+                                       k_proj=nn.Linear(self.fusion_embed_dim, num_kv_heads * head_dim, bias=False),
+                                       v_proj=nn.Linear(self.fusion_embed_dim, num_kv_heads * head_dim, bias=False),
+                                       output_proj=nn.Linear(self.fusion_embed_dim, self.fusion_embed_dim, bias=False),
+                                       pos_embeddings=rope,
+                                       attn_dropout=0.0,
+                                       is_causal=False)
+
+        mlp = FeedForward(gate_proj=nn.Linear(self.fusion_embed_dim, intermediate_dim),
+                          down_proj=nn.Linear(intermediate_dim, self.fusion_embed_dim),
+                          up_proj=None)
+
+        self.attn_layer = TransformerSelfAttentionLayer(attn=self_attn,
+                                                        mlp=mlp,
+                                                        sa_norm=RMSNorm(self.fusion_embed_dim, eps=1e-5),
+                                                        mlp_norm=RMSNorm(self.fusion_embed_dim, eps=1e-5),
+                                                        sa_scale=TanhGate(),
+                                                        mlp_scale=TanhGate())
+
+        self.input_proj = nn.ModuleList()
+        for in_channel in in_channels:
+            self.input_proj.append(
+                nn.Sequential(
+                    nn.Conv2d(in_channel, self.fusion_embed_dim, kernel_size=1, bias=False),
+                    nn.BatchNorm2d(self.fusion_embed_dim)
+                )
+            )
+
+        self.downsampling_convs = nn.ModuleList()
+        for idx, _ in enumerate(in_channels[:-1]):
+            self.downsampling_convs.append(
+                nn.Sequential(nn.Conv2d(self.fusion_embed_dim*(idx+1), self.fusion_embed_dim*(idx+1), kernel_size=3, stride=in_strides[idx+1]//in_strides[idx], padding=1, bias=False),
+                              nn.SiLU())
+            )
+
+    def forward(self, features):
+        proj_features = [self.input_proj[i](feat) for i, feat in enumerate(features)]
+
+        h, w = proj_features[-1].shape[2:]
+        flattened_feat = proj_features[-1].flatten(2).permute(0, 2, 1)
+        memory = self.attn_layer(flattened_feat)
+        proj_features[-1] = memory.permute(0, 2, 1).view(-1, self.fusion_embed_dim, h, w)
+        features = proj_features[0]
+        for idx, conv in enumerate(self.downsampling_convs):
+            features = torch.cat([conv(features), proj_features[idx+1]], dim=1)
+        return features.flatten(-2).tranpose(1, 2)
+
+
 class CurveHead(nn.Module):
     """
     Classification and regression head for baseline curves.
@@ -188,47 +261,6 @@ class CurveHead(nn.Module):
     def forward(self, x) -> Dict[str, torch.Tensor]:
         return {'tokens': self.cls_proj(x),
                 'curves': self.reg_proj(x).sigmoid()}
-
-
-def party_adapter(num_layers: int,
-                  num_heads: int,
-                  encoder_embed_dim: int,
-                  decoder_embed_dim: int) -> nn.Sequential:
-    """
-    Builds an adapter head consisting of `num_layers` self attention layers
-    followed by a linear projection of encoder_embed_dim to decoder_embed_dim.
-    """
-    mlp_ratio = 4
-    hidden_dim = int(mlp_ratio * encoder_embed_dim)
-    head_dim = encoder_embed_dim // num_heads
-    num_kv_heads = num_heads
-    layers = []
-    for _ in range(num_layers):
-        self_attn = MultiHeadAttention(embed_dim=encoder_embed_dim,
-                                       num_heads=num_heads,
-                                       num_kv_heads=num_heads,
-                                       head_dim=head_dim,
-                                       q_proj=nn.Linear(encoder_embed_dim, num_heads * head_dim, bias=False),
-                                       k_proj=nn.Linear(encoder_embed_dim, num_kv_heads * head_dim, bias=False),
-                                       v_proj=nn.Linear(encoder_embed_dim, num_kv_heads * head_dim, bias=False),
-                                       output_proj=nn.Linear(encoder_embed_dim, encoder_embed_dim, bias=False),
-                                       pos_embeddings=None,
-                                       attn_dropout=0.0,
-                                       is_causal=False)
-
-        mlp = FeedForward(gate_proj=nn.Linear(encoder_embed_dim, hidden_dim),
-                          down_proj=nn.Linear(hidden_dim, encoder_embed_dim),
-                          up_proj=None)
-
-        layer = TransformerSelfAttentionLayer(attn=self_attn,
-                                              mlp=mlp,
-                                              sa_norm=RMSNorm(encoder_embed_dim, eps=1e-5),
-                                              mlp_norm=RMSNorm(encoder_embed_dim, eps=1e-5),
-                                              sa_scale=TanhGate(),
-                                              mlp_scale=TanhGate())
-        layers.append(layer)
-    layers.append(nn.Linear(encoder_embed_dim, decoder_embed_dim))
-    return nn.Sequential(*layers)
 
 
 class OrliModel(nn.Module):
@@ -451,7 +483,7 @@ class OrliModel(nn.Module):
         Returns:
             A float tensor of with shape ``n x s x 8`` where ``n`` is the batch
             size, ``s`` is the maximum number of curves detected, and the last
-            dimension is an 8-tuple defining the control points of a cubic 
+            dimension is an 8-tuple defining the control points of a cubic
             Bézier curve. No-output is indicated by zeroed output control
             points. If s < max_generated_tokens the last entry across all batch
             items will be a no-output.

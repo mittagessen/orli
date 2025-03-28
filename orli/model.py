@@ -20,13 +20,14 @@ import torch
 import logging
 import lightning.pytorch as L
 
+from torch import nn
 from lightning.pytorch.callbacks import EarlyStopping
 from torch.optim import lr_scheduler
 from torchmetrics.aggregation import MeanMetric
 
 from typing import Literal, Tuple, Optional
 
-from orli.fusion import baseline_decoder, OrliModel
+from orli.fusion import baseline_decoder, OrliModel, EncoderFusion
 
 
 logger = logging.getLogger(__name__)
@@ -81,7 +82,7 @@ class SegmentationModel(L.LightningModule):
                  cos_t_max: float = 30,
                  cos_min_lr: float = 1e-4,
                  warmup: int = 15000,
-                 encoder: str = 'swin_base_patch4_window12_384.ms_in22k',
+                 encoder: str = 'convnext_small',
                  encoder_input_size: Tuple[int, int] = (2560, 1920),
                  freeze_encoder: bool = False,
                  pretrained: bool = False,
@@ -93,24 +94,24 @@ class SegmentationModel(L.LightningModule):
 
         logger.info('Creating segmentation model')
 
-        # enable fused attn in encoder
-        timm.layers.use_fused_attn(experimental=True)
-
         if not from_safetensors:
-            encoder_model = timm.create_model(encoder,
-                                              pretrained=pretrained,
-                                              num_classes=0,
-                                              img_size=encoder_input_size,
-                                              global_pool='')
+            backbone = timm.create_model(encoder,
+                                         pretrained=pretrained,
+                                         features_only=True,
+                                         output_stride=16)
+            max_seq_len = encoder_input_size[0] * encoder_input_size[1] // 16**2
 
-            l_idx = encoder_model.prune_intermediate_layers(indices=(-2,), prune_head=True, prune_norm=True)[0]
-            l_red = encoder_model.feature_info[l_idx]['reduction']
+            encoder_model = nn.Sequential(backbone,
+                                          EncoderFusion(in_channels=backbone.feature_info.channels(),
+                                                        in_strides=backbone.feature_info.reduction(),
+                                                        fusion_embed_dim=512,
+                                                        max_seq_len=max_seq_len))
 
-            decoder_model = baseline_decoder(encoder_max_seq_len=encoder_input_size[0] // l_red * encoder_input_size[1] // l_red)
+            decoder_model = baseline_decoder(encoder_max_seq_len=max_seq_len)
 
             self.model = OrliModel(encoder=encoder_model,
                                    decoder=decoder_model,
-                                   encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
+                                   encoder_embed_dim=512,
                                    decoder_embed_dim=decoder_model.tok_embeddings.out_features)
         else:
             self.model = OrliModel.from_safetensors(from_safetensors)
@@ -176,7 +177,6 @@ class SegmentationModel(L.LightningModule):
         Loads weights from a (possibly partial) safetensors file.
         """
         return cls(*args, **kwargs, pretrained=False, from_safetensors=path)
-
 
     def configure_callbacks(self):
         callbacks = []
