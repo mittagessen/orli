@@ -181,7 +181,7 @@ class EncoderFusion(nn.Module):
     def __init__(self,
                  in_channels: List[int],
                  in_strides: List[int],
-                 fusion_embed_dim: int = 512,
+                 fusion_embed_dim: int = 576,
                  intermediate_dim: int = 1536,
                  rope_base: int = 10000,
                  max_seq_len: int = 19200,
@@ -275,15 +275,10 @@ class OrliModel(nn.Module):
     """
     def __init__(self,
                  encoder: nn.Module,
-                 decoder: nn.Module,
-                 encoder_embed_dim: int,
-                 decoder_embed_dim: int):
+                 decoder: nn.Module):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
-
-        self.adapter = nn.Linear(encoder_embed_dim, decoder_embed_dim)
-
         self.ready_for_generation = False
 
     @classmethod

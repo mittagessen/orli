@@ -104,15 +104,13 @@ class SegmentationModel(L.LightningModule):
             encoder_model = nn.Sequential(backbone,
                                           EncoderFusion(in_channels=backbone.feature_info.channels(),
                                                         in_strides=backbone.feature_info.reduction(),
-                                                        fusion_embed_dim=512,
+                                                        fusion_embed_dim=576,
                                                         max_seq_len=max_seq_len))
 
             decoder_model = baseline_decoder(encoder_max_seq_len=max_seq_len)
 
             self.model = OrliModel(encoder=encoder_model,
-                                   decoder=decoder_model,
-                                   encoder_embed_dim=512,
-                                   decoder_embed_dim=decoder_model.tok_embeddings.out_features)
+                                   decoder=decoder_model)
         else:
             self.model = OrliModel.from_safetensors(from_safetensors)
 
