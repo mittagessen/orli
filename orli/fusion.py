@@ -16,7 +16,7 @@
 """Llama vision fusion model"""
 
 import logging
-from typing import Generator, Optional, Union, List, Dict, TYPE_CHECKING
+from typing import Generator, Optional, Union, List, Dict, TYPE_CHECKING, Sequence
 
 import json
 import torch
@@ -28,7 +28,7 @@ from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                           TransformerDecoder, FeedForward,
                           TransformerSelfAttentionLayer,
                           FusionLayer, scale_hidden_dim_for_mlp,
-                          Llama3ScaledRoPE, llama3_mlp)
+                          Llama3ScaledRoPE, ScaleEncoder, llama3_mlp)
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -174,77 +174,86 @@ def baseline_decoder(vocab_size: int = 12,
     return decoder
 
 
+class PruningModule(nn.Module):
+    """
+    Learned selective token pruning module.
+
+    Uses a simple MLP to produce a score map selecting `topk` tokens from an
+    input tensor with shape (B, S, C). 
+
+    Args:
+        channels: # of channels `C` of input
+        hidden_dim: dimensionality of intermediate MLP layer
+        topk: number of tokens to select.
+    """
+    def __init__(self,
+                 channels: int,
+                 intermediate_dim: int):
+        super().__init__()
+        self.mlp = nn.Sequential(RMSNorm(channels, eps=1e-05),
+                                 nn.Linear(channels, intermediate_dim),
+                                 nn.SiLU(),
+                                 nn.Linear(intermediate_dim, 1))
+
+    def forward(self, x: torch.Tensor, topk: int):
+        sel = self.mlp(x)  # (b,l,1)
+        # select tokens
+        _, topk_ind = torch.topk(sel, topk, dim=-2)
+        return x.gather(dim=1, index=topk_ind.repeat(1, 1, x.shape[-1]))
+
+
 class EncoderFusion(nn.Module):
     """
-    Fuses encoder feature pyramids
+    Fuses encoder feature pyramids with selective token pruning.
+
+    Args:
+        in_channels: Channel dimension size of each feature map.
+        topk_tokens: Number of tokens to retain for each map.
+        embed_dim: Output token embedding dimension.
+        intermediate_dim: Intermediate dimension of token pruning layer.
     """
     def __init__(self,
                  in_channels: List[int],
-                 in_strides: List[int],
-                 fusion_embed_dim: int = 576,
-                 intermediate_dim: int = 1536,
-                 rope_base: int = 10000,
-                 max_seq_len: int = 19200,
-                 num_heads: int = 8):
+                 topk_tokens: List[int],
+                 embed_dim: int = 128,
+                 intermediate_dim: int = 1536):
         super().__init__()
-        self.in_channels = in_channels
-        self.fusion_embed_dim = fusion_embed_dim // len(in_channels)
+        self.topk_tokens = topk_tokens
 
-        head_dim = self.fusion_embed_dim // num_heads
-        num_kv_heads = num_heads
+        self.scale_encoder = ScaleEncoder(len(in_channels))
 
-        rope = Llama3ScaledRoPE(dim=head_dim, max_seq_len=max_seq_len, base=rope_base)
-
-        self_attn = MultiHeadAttention(embed_dim=self.fusion_embed_dim,
-                                       num_heads=num_heads,
-                                       num_kv_heads=num_heads,
-                                       head_dim=head_dim,
-                                       q_proj=nn.Linear(self.fusion_embed_dim, num_heads * head_dim, bias=False),
-                                       k_proj=nn.Linear(self.fusion_embed_dim, num_kv_heads * head_dim, bias=False),
-                                       v_proj=nn.Linear(self.fusion_embed_dim, num_kv_heads * head_dim, bias=False),
-                                       output_proj=nn.Linear(self.fusion_embed_dim, self.fusion_embed_dim, bias=False),
-                                       pos_embeddings=rope,
-                                       attn_dropout=0.0,
-                                       is_causal=False)
-
-        mlp = FeedForward(gate_proj=nn.Linear(self.fusion_embed_dim, intermediate_dim),
-                          down_proj=nn.Linear(intermediate_dim, self.fusion_embed_dim),
-                          up_proj=None)
-
-        self.attn_layer = TransformerSelfAttentionLayer(attn=self_attn,
-                                                        mlp=mlp,
-                                                        sa_norm=RMSNorm(self.fusion_embed_dim, eps=1e-5),
-                                                        mlp_norm=RMSNorm(self.fusion_embed_dim, eps=1e-5),
-                                                        sa_scale=TanhGate(),
-                                                        mlp_scale=TanhGate())
-
-        self.input_proj = nn.ModuleList()
+        self.output_proj = nn.ModuleList()
         for in_channel in in_channels:
-            self.input_proj.append(
-                nn.Sequential(
-                    nn.Conv2d(in_channel, self.fusion_embed_dim, kernel_size=1, bias=False),
-                    nn.BatchNorm2d(self.fusion_embed_dim)
-                )
-            )
+            self.output_proj.append(nn.Linear(in_channel, embed_dim, bias=False))
 
-        self.downsampling_convs = nn.ModuleList()
-        for idx, _ in enumerate(in_channels[:-1]):
-            self.downsampling_convs.append(
-                nn.Sequential(nn.Conv2d(self.fusion_embed_dim*(idx+1), self.fusion_embed_dim*(idx+1), kernel_size=3, stride=in_strides[idx+1]//in_strides[idx], padding=1, bias=False),
-                              nn.SiLU())
-            )
+        self.pruning_layers = nn.ModuleList()
+        for idx, channels in enumerate(in_channels):
+            self.pruning_layers.append(PruningModule(channels, intermediate_dim))
 
-    def forward(self, features):
-        proj_features = [self.input_proj[i](feat) for i, feat in enumerate(features)]
+    def forward(self, features: Sequence[torch.Tensor]):
+        """
+        Args:
+            features: List of feature pyramid tensors with shape ``[b x c x h_n x w_n]``
 
-        h, w = proj_features[-1].shape[2:]
-        flattened_feat = proj_features[-1].flatten(2).permute(0, 2, 1)
-        memory = self.attn_layer(flattened_feat)
-        proj_features[-1] = memory.permute(0, 2, 1).view(-1, self.fusion_embed_dim, h, w)
-        features = proj_features[0]
-        for idx, conv in enumerate(self.downsampling_convs):
-            features = torch.cat([conv(features), proj_features[idx+1]], dim=1)
-        return features.flatten(-2).transpose(1, 2)
+        Returns:
+            Tensor: output tensor with shape ``[b x t x e]``
+        Notation used for tensor shapes:
+            - b: batch size
+            - c: channels
+            - h_n: height of n-th feature map
+            - w_n: width of n-th feature map
+            - t: sum of lengths of topk_tokens
+            - e: embed dim
+        """
+        os = []
+        for feat, prune, proj, tkt in zip(features,
+                                          self.pruning_layers,
+                                          self.output_proj,
+                                          self.topk_tokens):
+            o = prune(feat.flatten(-2).transpose(1, 2), tkt) # NCHW -> N(TKT)C
+            os.append(proj(o))
+        os = self.scale_encoder(os)
+        return torch.cat(os, dim=1)
 
 
 class CurveHead(nn.Module):
@@ -269,15 +278,16 @@ class OrliModel(nn.Module):
 
     Args:
         encoder: A timm image encoder model
-        decoder: Text decoder model
-        encoder_embed_dim: Embedding dimension of the encoder
-        decoder_embed_dim: Embedding dimension of the decoder
+        adapter: 
+        decoder: Curve decoder model 
     """
     def __init__(self,
                  encoder: nn.Module,
+                 adapter: nn.Module,
                  decoder: nn.Module):
         super().__init__()
         self.encoder = encoder
+        self.adapter = adapter
         self.decoder = decoder
         self.ready_for_generation = False
 

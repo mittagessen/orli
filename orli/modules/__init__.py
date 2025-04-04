@@ -5,3 +5,4 @@ from .llama_components import scale_hidden_dim_for_mlp, llama3_mlp, Llama3Scaled
 from .fusion_layer import FusionLayer  # NOQA
 from .transformer import TransformerCrossAttentionLayer, TransformerSelfAttentionLayer, TransformerDecoder  # NOQA
 from .feed_forward import FeedForward  # NOQA
+from .position_embeddings import ScaleEncoder  # NOQA
