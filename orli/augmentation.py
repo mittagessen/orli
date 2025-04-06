@@ -47,8 +47,12 @@ class BoundRandomResize(v2.RandomShortestSize):
         # recompute lower and upper ratios so resized image falls into bounds
         min_r = max(self.min_size[0]/orig_height, self.min_size[1]/orig_width)
         max_r = min(self.max_size[0]/orig_height, self.max_size[1]/orig_width)
-
-        r = torch.FloatTensor(1).uniform_(min_r, max_r).item()
+        
+        # do not randomly scale if dimensions would fall outside bounds
+        if max_r < min_r:
+            r = max_r
+        else:
+            r = torch.FloatTensor(1).uniform_(min_r, max_r).item()
         new_width = int(orig_width * r)
         new_height = int(orig_height * r)
 
