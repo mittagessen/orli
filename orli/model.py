@@ -20,12 +20,11 @@ import torch
 import logging
 import lightning.pytorch as L
 
-from torch import nn
 from lightning.pytorch.callbacks import EarlyStopping
 from torch.optim import lr_scheduler
 from torchmetrics.aggregation import MeanMetric
 
-from typing import Literal, Tuple, Optional
+from typing import Literal, Optional, List
 
 from orli.fusion import baseline_decoder, OrliModel, EncoderFusion
 
