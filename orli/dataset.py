@@ -97,14 +97,14 @@ class LineSegmentationDataModule(L.LightningDataModule):
         Actually builds the datasets.
         """
         self.train_set = BaselineSegmentationDataset(self.hparams.training_data,
-                                                     im_transforms=self.get_default_transforms(augment=self.hparams.augmentation),
+                                                     im_transforms=get_default_transforms(augment=self.hparams.augmentation),
                                                      augmentation=self.hparams.augmentation,
                                                      bos_token_id=self.bos_token_id,
                                                      eos_token_id=self.eos_token_id,
                                                      line_token_id=self.line_token_id)
 
         self.val_set = BaselineSegmentationDataset(self.hparams.evaluation_data,
-                                                   im_transforms=self.get_default_transforms(),
+                                                   im_transforms=get_default_transforms(),
                                                    augmentation=False,
                                                    bos_token_id=self.bos_token_id,
                                                    eos_token_id=self.eos_token_id,
