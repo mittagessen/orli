@@ -216,7 +216,7 @@ class EncoderFusion(nn.Module):
                  in_channels: List[int],
                  topk_tokens: List[int],
                  embed_dim: int = 128,
-                 intermediate_dim: int = 1536):
+                 intermediate_dim: int = 768):
         super().__init__()
         self.topk_tokens = topk_tokens
 

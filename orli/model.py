@@ -83,9 +83,10 @@ class SegmentationModel(L.LightningModule):
                  cos_min_lr: float = 1e-4,
                  warmup: int = 15000,
                  encoder: str = 'convnext_small',
-                 encoder_input_size: Tuple[int, int] = (2560, 1920),
+                 encoder_topk_tokens: List[int] = [8192, 4096, 256],
+                 encoder_embed_dim: int = 288,
                  freeze_encoder: bool = False,
-                 pretrained: bool = False,
+                 pretrained: bool = True,
                  from_safetensors: Optional[str] = None,
                  **kwargs):
         super().__init__()
@@ -95,21 +96,24 @@ class SegmentationModel(L.LightningModule):
         logger.info('Creating segmentation model')
 
         if not from_safetensors:
-            backbone = timm.create_model(encoder,
-                                         pretrained=pretrained,
-                                         features_only=True,
-                                         output_stride=16)
-            max_seq_len = encoder_input_size[0] * encoder_input_size[1] // 16**2
+            out_indices = list(range(4 - len(encoder_topk_tokens), 4, 1))
 
-            encoder_model = nn.Sequential(backbone,
-                                          EncoderFusion(in_channels=backbone.feature_info.channels(),
-                                                        in_strides=backbone.feature_info.reduction(),
-                                                        fusion_embed_dim=576,
-                                                        max_seq_len=max_seq_len))
+            encoder = timm.create_model(encoder,
+                                        pretrained=pretrained,
+                                        features_only=True,
+                                        out_indices=out_indices)
 
-            decoder_model = baseline_decoder(encoder_max_seq_len=max_seq_len)
+            max_seq_len = sum(encoder_topk_tokens)
 
-            self.model = OrliModel(encoder=encoder_model,
+            adapter = EncoderFusion(in_channels=encoder.feature_info.channels(),
+                                    topk_tokens=encoder_topk_tokens,
+                                    embed_dim=encoder_embed_dim)
+
+            decoder_model = baseline_decoder(embed_dim=encoder_embed_dim,
+                                             encoder_max_seq_len=max_seq_len)
+
+            self.model = OrliModel(encoder=encoder,
+                                   adapter=adapter,
                                    decoder=decoder_model)
         else:
             self.model = OrliModel.from_safetensors(from_safetensors)
