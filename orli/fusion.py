@@ -191,9 +191,9 @@ class PruningModule(nn.Module):
                  intermediate_dim: int):
         super().__init__()
         self.mlp = nn.Sequential(RMSNorm(channels, eps=1e-05),
-                                 nn.Linear(channels, intermediate_dim),
+                                 nn.Linear(channels, intermediate_dim, bias=False),
                                  nn.SiLU(),
-                                 nn.Linear(intermediate_dim, 1))
+                                 nn.Linear(intermediate_dim, 1, bias=False))
 
     def forward(self, x: torch.Tensor, topk: int):
         sel = self.mlp(x)  # (b,l,1)
