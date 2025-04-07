@@ -83,7 +83,7 @@ class SegmentationModel(L.LightningModule):
                  warmup: int = 15000,
                  encoder: str = 'convnext_base',
                  encoder_topk_tokens: List[int] = [8192, 4096, 256],
-                 encoder_embed_dim: int = 387,
+                 encoder_embed_dim: int = 576,
                  freeze_encoder: bool = False,
                  pretrained: bool = True,
                  from_safetensors: Optional[str] = None,
