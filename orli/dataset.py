@@ -221,9 +221,6 @@ class BaselineSegmentationDataset(Dataset):
             im = im.permute((1, 2, 0)).numpy()
             o = self.aug(image=im)
             im = torch.from_numpy(o['image'].transpose(2, 0, 1))
-            # baselines
-            lines += torch.rand_like(lines) * 0.001
-            lines.clamp_(0, 1)
 
         return {'image': im,
                 'tokens': line_cls,
