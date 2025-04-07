@@ -49,9 +49,9 @@ def get_default_transforms(dtype=torch.float32, augment=False):
     transforms = []
     if augment:
         from orli.augmentation import BoundRandomResize
-        transforms.append(BoundRandomResize((1280, 1024), (2560, 1920)))
+        transforms.append(BoundRandomResize((1280, 1024), (3840, 2880)))
     else:
-        transforms.append(v2.Resize(size=None, max_size=2560))
+        transforms.append(v2.Resize(size=None, max_size=3840))
     transforms.extend([v2.ToImage(),
                        v2.ToDtype(dtype, scale=True),
                        v2.Normalize(mean=[0.4850, 0.4560, 0.4060], std=[0.2290, 0.2240, 0.2250])])
