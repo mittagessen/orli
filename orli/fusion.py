@@ -25,8 +25,7 @@ from torch import nn
 
 from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                           TransformerCrossAttentionLayer,
-                          TransformerDecoder, FeedForward,
-                          TransformerSelfAttentionLayer,
+                          TransformerDecoder, TransformerSelfAttentionLayer,
                           FusionLayer, scale_hidden_dim_for_mlp,
                           Llama3ScaledRoPE, ScaleEncoder, llama3_mlp)
 
@@ -179,7 +178,7 @@ class PruningModule(nn.Module):
     Learned selective token pruning module.
 
     Uses a simple MLP to produce a score map selecting `topk` tokens from an
-    input tensor with shape (B, S, C). 
+    input tensor with shape (B, S, C).
 
     Args:
         channels: # of channels `C` of input
@@ -250,7 +249,7 @@ class EncoderFusion(nn.Module):
                                           self.pruning_layers,
                                           self.output_proj,
                                           self.topk_tokens):
-            o = prune(feat.flatten(-2).transpose(1, 2), tkt) # NCHW -> N(TKT)C
+            o = prune(feat.flatten(-2).transpose(1, 2), tkt)  # NCHW -> N(TKT)C
             os.append(proj(o))
         os = self.scale_encoder(os)
         return torch.cat(os, dim=1)
@@ -278,8 +277,8 @@ class OrliModel(nn.Module):
 
     Args:
         encoder: A timm image encoder model
-        adapter: 
-        decoder: Curve decoder model 
+        adapter:
+        decoder: Curve decoder model
     """
     def __init__(self,
                  encoder: nn.Module,
@@ -303,28 +302,29 @@ class OrliModel(nn.Module):
             metadata = f.metadata()
             config = json.loads(metadata['config'])
             encoder_config = {k[8:]: v for k, v in config.items() if k.startswith('encoder_')}
-            decoder_config = {k[8:]: v for k, v in config.items() if k.startswith('decoder_')}
-
             state_dict = {k: f.get_tensor(k) for k in f.keys()}
 
-        # enable fused attn in encoder
-        timm.layers.use_fused_attn(experimental=True)
+        out_indices = list(range(4 - len(encoder_config['topk_tokens']), 4, 1))
+        max_seq_len = sum(encoder_config['topk_tokens'])
 
         encoder_model = timm.create_model(encoder_config['name'],
                                           pretrained=False,
-                                          num_classes=0,
-                                          img_size=encoder_config['input_size'],
-                                          global_pool='')
+                                          features_only=True,
+                                          out_indices=out_indices)
 
-        l_idx = encoder_model.prune_intermediate_layers(indices=(-2,), prune_head=True, prune_norm=True)[0]
-        decoder_model = baseline_decoder(**decoder_config)
+        adapter = EncoderFusion(in_channels=encoder_model.feature_info.channels(),
+                                topk_tokens=encoder_config['topk_tokens'],
+                                embed_dim=encoder_config['embed_dim'])
+
+        decoder_model = baseline_decoder(embed_dim=encoder_config['embed_dim'],
+                                         encoder_max_seq_len=max_seq_len)
 
         model = cls(encoder=encoder_model,
-                    decoder=decoder_model,
-                    encoder_embed_dim=encoder_model.feature_info[l_idx]['num_chs'],
-                    decoder_embed_dim=decoder_model.tok_embeddings.out_features)
+                    adapter=adapter,
+                    decoder=decoder_model)
 
         model.load_state_dict(state_dict, strict=False)
+
         return model
 
     def setup_caches(self,
