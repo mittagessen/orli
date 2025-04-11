@@ -302,7 +302,7 @@ def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
 
     with threadpool_limits(limits=threads):
         if resume_from_checkpoint:
-            trainer.fit(ckpt=resume_from_checkpoint)
+            trainer.fit(ckpt_path=resume_from_checkpoint)
         else:
             if validate_before_train:
                 trainer.validate(model, data_module)
