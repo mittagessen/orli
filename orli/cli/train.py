@@ -247,11 +247,14 @@ def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
     else:
         val_check_interval = {'val_check_interval': hyper_params['freq']}
 
-    data_module = LineSegmentationDataModule(training_data=ground_truth,
-                                             evaluation_data=evaluation_files,
-                                             augmentation=augment,
-                                             batch_size=batch_size,
-                                             num_workers=workers)
+    if resume_from_checkpoint:
+        data_module = LineSegmentationDataModule.load_from_checkpoint(resume_from_checkpoint)
+    else:
+        data_module = LineSegmentationDataModule(training_data=ground_truth,
+                                                 evaluation_data=evaluation_files,
+                                                 augmentation=augment,
+                                                 batch_size=batch_size,
+                                                 num_workers=workers)
 
     cbs = [RichModelSummary(max_depth=2)]
 
@@ -302,7 +305,7 @@ def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
 
     with threadpool_limits(limits=threads):
         if resume_from_checkpoint:
-            trainer.fit(ckpt_path=resume_from_checkpoint)
+            trainer.fit(model, data_module, ckpt_path=resume_from_checkpoint)
         else:
             if validate_before_train:
                 trainer.validate(model, data_module)
