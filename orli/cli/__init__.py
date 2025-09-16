@@ -6,8 +6,8 @@ from PIL import Image
 from rich.logging import RichHandler
 from rich.traceback import install
 
+from .pred import segment
 from .train import train, convert
-
 
 def set_logger(logger=None, level=logging.ERROR):
     logger.addHandler(RichHandler(rich_tracebacks=True))
@@ -68,6 +68,7 @@ def cli(ctx, verbose, seed, deterministic, device, precision, threads):
 
 cli.add_command(train)
 cli.add_command(convert)
+cli.add_command(segment)
 
 if __name__ == '__main__':
     cli()

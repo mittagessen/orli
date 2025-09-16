@@ -27,7 +27,7 @@ from pathlib import Path
 from .util import to_ptl_device, get_input_parser
 
 logging.captureWarnings(True)
-logger = logging.getLogger('party')
+logger = logging.getLogger('orli')
 
 
 @click.command('segment')
@@ -44,11 +44,11 @@ logger = logging.getLogger('party')
 @click.option('-m', '--load-from-repo',
               default=None,
               show_default=True,
-              help="HTRMoPo identifier of the party model to evaluate")
+              help="HTRMoPo identifier of the orli model to evaluate")
 @click.option('-mi', '--load-from-file',
               default=None,
               show_default=True,
-              help="Path to the party model to evaluate")
+              help="Path to safetensors file containing orli weights")
 @click.option('-h', '--hocr', 'serializer',
               help='Switch between hOCR, ALTO, abbyyXML, PageXML or "native" '
               'output. Native are plain image files for image, JSON for '
@@ -151,9 +151,8 @@ def segment(ctx, input, batch_input, suffix, load_from_repo, load_from_file,
             for input_file, output_file in input:
                 input_file = Path(input_file)
                 output_file = Path(output_file)
-                imagename = get_input_parser(ctx.meta['input_format_type'])(input).imagename
 
-                im = Image.open(imagename)
+                im = Image.open(input_file)
                 res = segment_(model=model, im=im, fabric=fabric)
                 with click.open_file(output_file, 'w', encoding='utf-8') as fp:
                     logger.info(f'Serializing as {serializer} into {output_file}')

@@ -24,6 +24,7 @@ import numpy as np
 
 from dataclasses import asdict
 
+from scipy.special import comb
 from kraken.containers import Segmentation, BaselineLine
 
 from typing import TYPE_CHECKING, Union, Tuple, Optional, Literal, Generator, List
@@ -40,21 +41,31 @@ if TYPE_CHECKING:
     from PIL import Image
     from lightning.fabric import Fabric
 
-__all__ = ['batched_pred']
+__all__ = ['segment']
+
+# magic lsq cubic bezier fit function from the internet.
+def Mtk(n, t, k):
+    return t**k * (1-t)**(n-k) * comb(n, k)
+
+
+def BezierCoeff(ts):
+    return [[Mtk(3, t, k) for k in range(4)] for t in ts]
 
 
 def sample_curves(curves: torch.Tensor) -> List[List[Tuple[int, int]]]:
     samples = np.linspace(0, 1, 20)
-    coeff = BezierCoeff(samples))
+    coeff = np.array(BezierCoeff(samples))
+    lines = []
     for curve in curves:
-        curve = np.array(curves)
+        curve = np.array(curve)
         curve.resize(4, 2)
-        coeff.dot(curve)
+        lines.append(coeff.dot(curve))
+    return lines
 
 
 def segment(model: 'OrliModel',
             im: 'Image.Image',
-            fabric: 'Fabric') -> Segmentation
+            fabric: 'Fabric') -> Segmentation:
     """
     Baseline segmentation
 
@@ -85,4 +96,6 @@ def segment(model: 'OrliModel',
         if not curves[-1].any():
             curves = curves[:-1]
         curves *= curve_scale
-    lines = sample_curve(curves)
+    lines = sample_curves(curves)
+    print(f'lines_shape: {lines[0].shape}\nlines: {len(lines)}')
+    return lines

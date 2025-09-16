@@ -81,7 +81,7 @@ class SegmentationModel(L.LightningModule):
                  cos_t_max: float = 30,
                  cos_min_lr: float = 1e-4,
                  warmup: int = 15000,
-                 encoder: str = 'convnext_base',
+                 encoder_name: str = 'convnext_base',
                  encoder_topk_tokens: List[int] = [8192, 4096, 256],
                  encoder_embed_dim: int = 576,
                  freeze_encoder: bool = False,
@@ -97,7 +97,7 @@ class SegmentationModel(L.LightningModule):
         if not from_safetensors:
             out_indices = list(range(4 - len(encoder_topk_tokens), 4, 1))
 
-            encoder = timm.create_model(encoder,
+            encoder = timm.create_model(encoder_name,
                                         pretrained=pretrained,
                                         features_only=True,
                                         out_indices=out_indices)

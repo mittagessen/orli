@@ -47,7 +47,7 @@ def baseline_decoder(vocab_size: int = 12,
                      attn_dropout: int = 0.0,
                      norm_eps: int = 1e-5,
                      rope_base: int = 10000,
-                     encoder_max_seq_len: int = 19200,  # start of fusion parameters
+                     encoder_max_seq_len: int = 12544,  # start of fusion parameters
                      pretrained: Optional[str] = None,
                      **kwargs) -> TransformerDecoder:
     """
@@ -280,6 +280,8 @@ class OrliModel(nn.Module):
         adapter:
         decoder: Curve decoder model
     """
+    eos_id: int = 2
+
     def __init__(self,
                  encoder: nn.Module,
                  adapter: nn.Module,
@@ -443,7 +445,7 @@ class OrliModel(nn.Module):
     def prepare_for_generation(self,
                                bos_id: torch.Tensor = torch.Tensor([1]).long(),
                                batch_size: int = 1,
-                               max_encoder_seq_len: int = 19200,
+                               max_encoder_seq_len: int = 12544,
                                max_generated_tokens: int = 768,
                                device: torch.device = torch.device('cpu')):
 
@@ -468,20 +470,17 @@ class OrliModel(nn.Module):
                           dtype=next(self.encoder.parameters()).dtype)
 
         # create batch size number of BOS tokens
-        self._prompt = F.one_hot(bos_id-1, num_classes=12).to(device=device, dtype=torch.float).unsqueeze(0).repeat(batch_size, 1, 1)
+        self._prompt = F.one_hot(bos_id, num_classes=12).to(device=device, dtype=torch.float).unsqueeze(0).repeat(batch_size, 1, 1)
         self.ready_for_generation = True
 
     @torch.inference_mode()
     def predict(self,
-                encoder_input: torch.FloatTensor,
-                eos_id: int = 2) -> Generator[torch.Tensor, None, None]:
+                encoder_input: torch.FloatTensor) -> Generator[torch.Tensor, None, None]:
         """
-        Predicts text from an input page image and a number of cubic Bézier
-        curves.
+        Predicts Bézier curves and line classes.
 
         Args:
             encoder_input: Image input for the encoder with shape ``n x c x h x w``
-            eos_id: EOS ID of tokenizer
 
         Returns:
             A float tensor of with shape ``n x s x 8`` where ``n`` is the batch
@@ -495,7 +494,7 @@ class OrliModel(nn.Module):
 
         encoder_hidden_states = self.forward_encoder_embeddings(encoder_input)
 
-        eos_token = torch.tensor(eos_id, device=encoder_hidden_states.device, dtype=torch.long)
+        eos_token = torch.tensor(self.eos_id, device=encoder_hidden_states.device, dtype=torch.long)
 
         # Mask is shape (batch_size, max_seq_len, image_embedding_len)
         encoder_mask = torch.ones((encoder_hidden_states.size(0),
@@ -536,6 +535,7 @@ class OrliModel(nn.Module):
                                                     curves], dim=-1),
                                   mask=curr_masks,
                                   input_pos=curr_input_pos)
+            print(f'tokens: {logits["tokens"]} curves: {logits["curves"]}')
             tokens = torch.argmax(logits['tokens'], dim=-1)
             curves = logits['curves']
             generated_tokens.append(tokens[:, -1])

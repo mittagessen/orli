@@ -311,12 +311,6 @@ def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
                 trainer.validate(model, data_module)
             trainer.fit(model, data_module)
 
-    if model.best_epoch == -1:
-        logger.warning('Model did not improve during training.')
-        ctx.exit(1)
-
     if not model.current_epoch:
         logger.warning('Training aborted before end of first epoch.')
         ctx.exit(1)
-
-    print(f'Best model {checkpoint_callback.best_model_path}')
