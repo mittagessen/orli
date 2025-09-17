@@ -19,7 +19,7 @@ Default hyperparameters
 SEGMENTATION_HYPER_PARAMS = {'freq': 1.0,
                              'batch_size': 8,
                              'quit': 'fixed',
-                             'epochs': 100,
+                             'epochs': 16,
                              'min_epochs': 10,
                              'lag': 10,
                              'min_delta': None,
@@ -38,10 +38,10 @@ SEGMENTATION_HYPER_PARAMS = {'freq': 1.0,
                              'rop_factor': 0.1,
                              'rop_patience': 5,
                              # cosine
-                             'cos_t_max': 100,
+                             'cos_t_max': 16,
                              'cos_min_lr': 5e-6,
                              'warmup': 1000,
                              'accumulate_grad_batches': 8,
                              'gradient_clip_val': 1.0,
-                             'freeze_encoder': True
+                             'freeze_encoder': False 
                              }
