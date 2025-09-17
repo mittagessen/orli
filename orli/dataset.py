@@ -45,18 +45,11 @@ logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = 20000 ** 2
 
 
-def get_default_transforms(dtype=torch.float32, augment=False):
-    transforms = []
-    if augment:
-        from orli.augmentation import BoundRandomResize
-        transforms.append(BoundRandomResize((1280, 1024), (2560, 1920)))
-    else:
-        transforms.append(v2.Resize(size=None, max_size=2560))
-    transforms.extend([v2.ToImage(),
+def get_default_transforms(dtype=torch.float32):
+    return v2.Compose([v2.Resize((1920, 1440)),
+                       v2.ToImage(),
                        v2.ToDtype(dtype, scale=True),
                        v2.Normalize(mean=[0.4850, 0.4560, 0.4060], std=[0.2290, 0.2240, 0.2250])])
-    return v2.Compose(transforms)
-
 
 def collate_curves(batch,
                    max_lines_in_page: int):
@@ -97,7 +90,7 @@ class LineSegmentationDataModule(L.LightningDataModule):
         Actually builds the datasets.
         """
         self.train_set = BaselineSegmentationDataset(self.hparams.training_data,
-                                                     im_transforms=get_default_transforms(augment=self.hparams.augmentation),
+                                                     im_transforms=get_default_transforms(),
                                                      augmentation=self.hparams.augmentation,
                                                      bos_token_id=self.bos_token_id,
                                                      eos_token_id=self.eos_token_id,
