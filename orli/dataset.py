@@ -57,8 +57,8 @@ def collate_curves(batch,
     Concatenates and pads curves.
     """
     return {'image': default_collate([item['image'] for item in batch]),
-            'tokens': torch.stack([F.pad(x['tokens'], pad=(0, 0, 0, max_lines_in_page-len(x['tokens'])+2), value=-1) for x in batch]),
-            'curves': torch.stack([F.pad(x['curves'], pad=(0, 0, 0, max_lines_in_page-len(x['curves'])+2), value=-1) for x in batch])}
+            'tokens': torch.stack([F.pad(x['tokens'], pad=(0, 0, 0, max_lines_in_page-len(x['tokens'])), value=-1) for x in batch]),
+            'curves': torch.stack([F.pad(x['curves'], pad=(0, 0, 0, max_lines_in_page-len(x['curves'])), value=-1) for x in batch])}
 
 
 def _validation_worker_init_fn(worker_id):
@@ -169,7 +169,7 @@ class BaselineSegmentationDataset(Dataset):
                 raw_metadata = ds_table.schema.metadata
                 if not raw_metadata or b'max_lines_in_page' not in raw_metadata:
                     raise ValueError(f'{file} does not contain a valid metadata record.')
-                self.max_lines_in_page = max(int.from_bytes(raw_metadata[b'max_lines_in_page'], 'little'), self.max_lines_in_page)
+                self.max_lines_in_page = max(int.from_bytes(raw_metadata[b'max_lines_in_page'], 'little') + 2, self.max_lines_in_page)
                 if not self.arrow_table:
                     self.arrow_table = ds_table
                 else:
@@ -185,7 +185,7 @@ class BaselineSegmentationDataset(Dataset):
         logger.debug(f'Attempting to load {item["im"]}')
         im, page_data = item['im'], item['lines']
         # skip pages with more than max_pos_embeddings lines
-        if len(page_data) + 2 > self.max_lines_per_page:
+        if len(page_data) + 2 >= self.max_lines_per_page:
             rng = np.random.default_rng()
             idx = rng.integers(0, len(self))
             return self[idx]
