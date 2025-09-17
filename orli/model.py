@@ -32,6 +32,7 @@ from orli.fusion import baseline_decoder, OrliModel
 logger = logging.getLogger(__name__)
 
 
+@torch.compile(dynamic=False)
 def model_step(model,
                cls_criterion,
                curve_criterion,
