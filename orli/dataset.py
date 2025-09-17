@@ -64,8 +64,8 @@ def collate_curves(batch,
     Concatenates and pads curves.
     """
     return {'image': default_collate([item['image'] for item in batch]),
-            'tokens': torch.stack([F.pad(x['tokens'], pad=(0, 0, 0, max_lines_in_page-len(x['tokens'])), value=-1) for x in batch]),
-            'curves': torch.stack([F.pad(x['curves'], pad=(0, 0, 0, max_lines_in_page-len(x['curves'])), value=-1) for x in batch])}
+            'tokens': torch.stack([F.pad(x['tokens'], pad=(0, 0, 0, max_lines_in_page-len(x['tokens'])+2), value=-1) for x in batch]),
+            'curves': torch.stack([F.pad(x['curves'], pad=(0, 0, 0, max_lines_in_page-len(x['curves'])+2), value=-1) for x in batch])}
 
 
 def _validation_worker_init_fn(worker_id):
