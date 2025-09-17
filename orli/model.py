@@ -24,9 +24,9 @@ from lightning.pytorch.callbacks import EarlyStopping
 from torch.optim import lr_scheduler
 from torchmetrics.aggregation import MeanMetric
 
-from typing import Literal, Optional, List
+from typing import Literal, Optional
 
-from orli.fusion import baseline_decoder, OrliModel, EncoderFusion
+from orli.fusion import baseline_decoder, OrliModel
 
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,6 @@ def model_step(model,
 
     target_tokens = torch.hstack((tokens[..., 1:, :], ignore_idxs_tokens))
     target_curves = torch.hstack((curves[..., 1:, :], ignore_idxs_curves)).view(-1)
-
     # our tokens already contain BOS/EOS tokens so we just run it
     # through the model after replacing ignored indices.
     tokens.masked_fill_(tokens == -1.0, 0)
@@ -81,9 +80,9 @@ class SegmentationModel(L.LightningModule):
                  cos_t_max: float = 30,
                  cos_min_lr: float = 1e-4,
                  warmup: int = 15000,
-                 encoder_name: str = 'convnext_base',
-                 encoder_topk_tokens: List[int] = [8192, 4096, 256],
-                 encoder_embed_dim: int = 576,
+                 encoder: str = 'convnextv2_tiny.fcmae_ft_in22k_in1k_384',
+                 encoder_input_size: tuple[int, int] = (1920, 1440),
+                 encoder_idxs: list[int] = (1, 2, 3),
                  freeze_encoder: bool = False,
                  pretrained: bool = True,
                  from_safetensors: Optional[str] = None,
@@ -94,28 +93,21 @@ class SegmentationModel(L.LightningModule):
 
         logger.info('Creating segmentation model')
 
-        if not from_safetensors:
-            out_indices = list(range(4 - len(encoder_topk_tokens), 4, 1))
+        encoder_model = timm.create_model(encoder,
+                                          pretrained=pretrained,
+                                          features_only=True,
+                                          out_indices=encoder_idxs)
 
-            encoder = timm.create_model(encoder_name,
-                                        pretrained=pretrained,
-                                        features_only=True,
-                                        out_indices=out_indices)
+        encoder_sizes = [(int(encoder_input_size[0]/encoder_model.feature_info.reduction(idx)),
+                          int(encoder_input_size[1]/encoder_model.feature_info.reduction(idx)),
+                          encoder_model.feature_info.channels(idx)) for idx in encoder_idxs]
 
-            max_seq_len = sum(encoder_topk_tokens)
+        decoder_model = baseline_decoder(encoder_sizes=[x[:2] for x in encoder_sizes])
 
-            adapter = EncoderFusion(in_channels=encoder.feature_info.channels(),
-                                    topk_tokens=encoder_topk_tokens,
-                                    embed_dim=encoder_embed_dim)
-
-            decoder_model = baseline_decoder(embed_dim=encoder_embed_dim,
-                                             encoder_max_seq_len=max_seq_len)
-
-            self.model = OrliModel(encoder=encoder,
-                                   adapter=adapter,
-                                   decoder=decoder_model)
-        else:
-            self.model = OrliModel.from_safetensors(from_safetensors)
+        self.model = OrliModel(encoder=encoder_model,
+                               decoder=decoder_model,
+                               encoder_embed_dims=[x[2] for x in encoder_sizes],
+                               decoder_embed_dim=decoder_model.tok_embeddings.out_features)
 
         if freeze_encoder:
             for param in self.model.encoder.parameters():
@@ -124,7 +116,6 @@ class SegmentationModel(L.LightningModule):
         self.model.train()
 
         self.val_mean = MeanMetric()
-        self.model_step = torch.compile(model_step)
         self.curve_criterion = torch.nn.MSELoss()
         self.cls_criterion = torch.nn.CrossEntropyLoss()
 
@@ -132,10 +123,10 @@ class SegmentationModel(L.LightningModule):
         return self.model(pixel_values=x)
 
     def training_step(self, batch, batch_idx):
-        loss = self.model_step(self.model,
-                               self.cls_criterion,
-                               self.curve_criterion,
-                               batch)
+        loss = model_step(self.model,
+                          self.cls_criterion,
+                          self.curve_criterion,
+                          batch)
         self.log('train_loss',
                  loss,
                  batch_size=batch['tokens'].shape[0],
@@ -146,10 +137,10 @@ class SegmentationModel(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss = self.model_step(self.model,
-                               self.cls_criterion,
-                               self.curve_criterion,
-                               batch)
+        loss = model_step(self.model,
+                          self.cls_criterion,
+                          self.curve_criterion,
+                          batch)
         self.val_mean.update(loss)
         return loss
 

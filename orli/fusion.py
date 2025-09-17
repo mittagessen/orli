@@ -16,7 +16,7 @@
 """Llama vision fusion model"""
 
 import logging
-from typing import Generator, Optional, Union, List, Dict, TYPE_CHECKING, Sequence
+from typing import Generator, Optional, Union, List, Dict, TYPE_CHECKING
 
 import json
 import torch
@@ -24,10 +24,10 @@ import torch.nn.functional as F
 from torch import nn
 
 from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
-                          TransformerCrossAttentionLayer,
+                          TransformerCrossAttentionLayer, FeedForward,
                           TransformerDecoder, TransformerSelfAttentionLayer,
                           FusionLayer, scale_hidden_dim_for_mlp,
-                          Llama3ScaledRoPE, ScaleEncoder, llama3_mlp)
+                          Llama3ScaledRoPE, llama3_mlp)
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -106,11 +106,11 @@ def baseline_decoder(vocab_size: int = 12,
         self_attn = MultiHeadAttention(
             embed_dim=config['embed_dim'],
             num_heads=config['num_heads'],
-            num_kv_heads=num_kv_heads,
+            num_kv_heads=config['num_kv_heads'],
             head_dim=head_dim,
             q_proj=nn.Linear(config['embed_dim'], config['num_heads'] * head_dim, bias=False),
-            k_proj=nn.Linear(config['embed_dim'], num_kv_heads * head_dim, bias=False),
-            v_proj=nn.Linear(config['embed_dim'], num_kv_heads * head_dim, bias=False),
+            k_proj=nn.Linear(config['embed_dim'], config['num_kv_heads'] * head_dim, bias=False),
+            v_proj=nn.Linear(config['embed_dim'], config['num_kv_heads'] * head_dim, bias=False),
             output_proj=nn.Linear(config['embed_dim'], config['embed_dim'], bias=False),
             pos_embeddings=rope,
             max_seq_len=config['max_seq_len'],
@@ -126,12 +126,12 @@ def baseline_decoder(vocab_size: int = 12,
 
         attn = MultiHeadAttention(
             embed_dim=config['embed_dim'],
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
+            num_heads=config['num_heads'],
+            num_kv_heads=config['num_kv_heads'],
             head_dim=head_dim,
             q_proj=nn.Linear(config['embed_dim'], config['num_heads'] * head_dim, bias=False),
-            k_proj=nn.Linear(config['embed_dim'], num_kv_heads * head_dim, bias=False),
-            v_proj=nn.Linear(config['embed_dim'], num_kv_heads * head_dim, bias=False),
+            k_proj=nn.Linear(config['embed_dim'], config['num_kv_heads'] * head_dim, bias=False),
+            v_proj=nn.Linear(config['embed_dim'], config['num_kv_heads'] * head_dim, bias=False),
             output_proj=nn.Linear(config['embed_dim'], config['embed_dim'], bias=False),
             q_norm=RMSNorm(dim=head_dim, eps=1e-05),
             k_norm=RMSNorm(dim=head_dim, eps=1e-05),
@@ -173,85 +173,58 @@ def baseline_decoder(vocab_size: int = 12,
     return decoder
 
 
-class PruningModule(nn.Module):
+class OrliAdapter(nn.Module):
     """
-    Learned selective token pruning module.
-
-    Uses a simple MLP to produce a score map selecting `topk` tokens from an
-    input tensor with shape (B, S, C).
-
-    Args:
-        channels: # of channels `C` of input
-        hidden_dim: dimensionality of intermediate MLP layer
-        topk: number of tokens to select.
+    Builds an adapter head consisting of `num_layers` self attention layers
+    followed by a linear projection of encoder_embed_dim to decoder_embed_dim.
     """
     def __init__(self,
-                 channels: int,
-                 intermediate_dim: int):
+                 num_layers: int,
+                 num_heads: int,
+                 encoder_embed_dims: list[int],
+                 decoder_embed_dim: int):
         super().__init__()
-        self.mlp = nn.Sequential(RMSNorm(channels, eps=1e-05),
-                                 nn.Linear(channels, intermediate_dim, bias=False),
-                                 nn.SiLU(),
-                                 nn.Linear(intermediate_dim, 1, bias=False))
+        mlp_ratio = 4
+        num_kv_heads = num_heads
+        self.adapter = nn.ModuleList()
 
-    def forward(self, x: torch.Tensor, topk: int):
-        sel = self.mlp(x)  # (b,l,1)
-        # select tokens
-        _, topk_ind = torch.topk(sel, topk, dim=-2)
-        return x.gather(dim=1, index=topk_ind.repeat(1, 1, x.shape[-1]))
+        for encoder_embed_dim in encoder_embed_dims:
+            hidden_dim = int(mlp_ratio * encoder_embed_dim)
+            head_dim = encoder_embed_dim // num_heads
 
+            layers = []
+            for _ in range(num_layers):
+                self_attn = MultiHeadAttention(embed_dim=encoder_embed_dim,
+                                               num_heads=num_heads,
+                                               num_kv_heads=num_heads,
+                                               head_dim=head_dim,
+                                               q_proj=nn.Linear(encoder_embed_dim, num_heads * head_dim, bias=False),
+                                               k_proj=nn.Linear(encoder_embed_dim, num_kv_heads * head_dim, bias=False),
+                                               v_proj=nn.Linear(encoder_embed_dim, num_kv_heads * head_dim, bias=False),
+                                               output_proj=nn.Linear(encoder_embed_dim, encoder_embed_dim, bias=False),
+                                               pos_embeddings=None,
+                                               attn_dropout=0.0,
+                                               is_causal=False)
 
-class EncoderFusion(nn.Module):
-    """
-    Fuses encoder feature pyramids with selective token pruning.
+                mlp = FeedForward(gate_proj=nn.Linear(encoder_embed_dim, hidden_dim),
+                                  down_proj=nn.Linear(hidden_dim, encoder_embed_dim),
+                                  up_proj=None)
 
-    Args:
-        in_channels: Channel dimension size of each feature map.
-        topk_tokens: Number of tokens to retain for each map.
-        embed_dim: Output token embedding dimension.
-        intermediate_dim: Intermediate dimension of token pruning layer.
-    """
-    def __init__(self,
-                 in_channels: List[int],
-                 topk_tokens: List[int],
-                 embed_dim: int = 128,
-                 intermediate_dim: int = 768):
-        super().__init__()
-        self.topk_tokens = topk_tokens
+                layer = TransformerSelfAttentionLayer(attn=self_attn,
+                                                      mlp=mlp,
+                                                      sa_norm=RMSNorm(encoder_embed_dim, eps=1e-5),
+                                                      mlp_norm=RMSNorm(encoder_embed_dim, eps=1e-5),
+                                                      sa_scale=TanhGate(),
+                                                      mlp_scale=TanhGate())
+                layers.append(layer)
+            layers.append(nn.Linear(encoder_embed_dim, decoder_embed_dim))
+            self.adapter.append(nn.Sequential(*layers))
 
-        self.scale_encoder = ScaleEncoder(len(in_channels))
-
-        self.output_proj = nn.ModuleList()
-        for in_channel in in_channels:
-            self.output_proj.append(nn.Linear(in_channel, embed_dim, bias=False))
-
-        self.pruning_layers = nn.ModuleList()
-        for idx, channels in enumerate(in_channels):
-            self.pruning_layers.append(PruningModule(channels, intermediate_dim))
-
-    def forward(self, features: Sequence[torch.Tensor]):
-        """
-        Args:
-            features: List of feature pyramid tensors with shape ``[b x c x h_n x w_n]``
-
-        Returns:
-            Tensor: output tensor with shape ``[b x t x e]``
-        Notation used for tensor shapes:
-            - b: batch size
-            - c: channels
-            - h_n: height of n-th feature map
-            - w_n: width of n-th feature map
-            - t: sum of lengths of topk_tokens
-            - e: embed dim
-        """
+    def forward(self, encoder_hidden_states: list[torch.Tensor]) -> torch.Tensor:
         os = []
-        for feat, prune, proj, tkt in zip(features,
-                                          self.pruning_layers,
-                                          self.output_proj,
-                                          self.topk_tokens):
-            o = prune(feat.flatten(-2).transpose(1, 2), tkt)  # NCHW -> N(TKT)C
-            os.append(proj(o))
-        os = self.scale_encoder(os)
+        for idx, hidden_state in enumerate(encoder_hidden_states):
+            hidden_state = hidden_state.flatten(-2).transpose(-1, -2)
+            os.append(self.adapter[idx](hidden_state))
         return torch.cat(os, dim=1)
 
 
@@ -284,12 +257,20 @@ class OrliModel(nn.Module):
 
     def __init__(self,
                  encoder: nn.Module,
-                 adapter: nn.Module,
-                 decoder: nn.Module):
+                 decoder: nn.Module,
+                 encoder_embed_dims: list[int],
+                 decoder_embed_dim: int,
+                 adapter_num_layers: int = 1,
+                 adapter_num_heads: int = 8):
         super().__init__()
         self.encoder = encoder
-        self.adapter = adapter
         self.decoder = decoder
+
+        self.adapter = OrliAdapter(adapter_num_layers,
+                                   adapter_num_heads,
+                                   encoder_embed_dims,
+                                   decoder_embed_dim)
+
         self.ready_for_generation = False
 
     @classmethod
@@ -302,30 +283,30 @@ class OrliModel(nn.Module):
 
         with safe_open(filename, framework='pt') as f:
             metadata = f.metadata()
+            if metadata['model_type'] != 'kraken_llama_party':
+                raise ValueError(f'{filename} is not a llama party model. Got type {metadata["model_type"]}, expected: kraken_llama_party.')
             config = json.loads(metadata['config'])
             encoder_config = {k[8:]: v for k, v in config.items() if k.startswith('encoder_')}
-            state_dict = {k: f.get_tensor(k) for k in f.keys()}
 
-        out_indices = list(range(4 - len(encoder_config['topk_tokens']), 4, 1))
-        max_seq_len = sum(encoder_config['topk_tokens'])
+            state_dict = {k: f.get_tensor(k) for k in f.keys()}
 
         encoder_model = timm.create_model(encoder_config['name'],
                                           pretrained=False,
                                           features_only=True,
-                                          out_indices=out_indices)
+                                          out_indices=encoder_config['idxs'])
 
-        adapter = EncoderFusion(in_channels=encoder_model.feature_info.channels(),
-                                topk_tokens=encoder_config['topk_tokens'],
-                                embed_dim=encoder_config['embed_dim'])
+        encoder_sizes = [(int(encoder_config['input_size'][0]/encoder_model.feature_info.reduction(idx)),
+                          int(encoder_config['input_size'][1]/encoder_model.feature_info.reduction(idx)),
+                          encoder_model.feature_info.channels(idx)) for idx in encoder_config['idxs']]
 
-        decoder_model = baseline_decoder(embed_dim=encoder_config['embed_dim'],
-                                         encoder_max_seq_len=max_seq_len)
+        decoder_model = baseline_decoder(encoder_sizes=[x[:2] for x in encoder_sizes])
 
-        model = cls(encoder=encoder_model,
-                    adapter=adapter,
-                    decoder=decoder_model)
+        model = OrliModel(encoder=encoder_model,
+                          decoder=decoder_model,
+                          encoder_embed_dims=[x[2] for x in encoder_sizes],
+                          decoder_embed_dim=decoder_model.tok_embeddings.out_features)
 
-        model.load_state_dict(state_dict, strict=False)
+        model.load_state_dict(state_dict)
 
         return model
 
