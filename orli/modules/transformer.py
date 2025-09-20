@@ -143,7 +143,11 @@ class TransformerCrossAttentionLayer(nn.Module):
         mlp_norm (Optional[nn.Module]): Normalization to be applied before the feed-forward layer.
         ca_scale (Optional[nn.Module]): Module to scale cross-attention output.
         mlp_scale (Optional[nn.Module]): Module to scale the feed-forward output.
+
+    Raises:
+        AssertionError: if attn.pos_embeddings is set.
     """
+
     def __init__(
         self,
         attn: MultiHeadAttention,
@@ -155,6 +159,11 @@ class TransformerCrossAttentionLayer(nn.Module):
         mlp_scale: Optional[nn.Module] = None,
     ) -> None:
         super().__init__()
+        if attn.pos_embeddings is not None:
+            raise AssertionError(
+                "Doesn't support positional embeddings for cross attention, \
+                because q and k are different sequences."
+            )
         self.attn = attn
         self.mlp = mlp
         self.ca_norm = ca_norm or nn.Identity()
@@ -413,7 +422,7 @@ class TransformerDecoder(nn.Module):
             isinstance(m, TransformerCrossAttentionLayer) for m in self.modules()
         )
         has_decoder_layers = any(
-            isinstance(layer, TransformerSelfAttentionLayer) for layer in self.layers
+            isinstance(m, TransformerSelfAttentionLayer) for m in self.modules()
         )
 
         if has_encoder_layers:
@@ -637,7 +646,7 @@ class TransformerDecoder(nn.Module):
             output = self.chunked_output(h)
         else:
             # shape: [b, seq_len, out_dim]
-            output = self.output(h).float()
+            output = self.output(h)
 
         # Output list if hidden states are requested, otherwise just the output
         # TODO: always output a list to have a consistent output type
