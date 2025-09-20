@@ -5,27 +5,46 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from typing import Optional, List
+from typing import Optional
 
 import torch
 
 from torch import nn
 
+from typing import Any
 
-class ScaleEncoder(nn.Module):
+
+class ChainedPositionEmbeddingRandom(nn.Module):
     """
-    Learnable embedding to mark the scale of the concatenated feature maps in
-    encoder memory for cross attention.
+    Precomputed 2D positional encodings of a concatenated feature pyramid.
+
+    Args:
+        embed_dim: size of the embedding
+        sizes: List of the extends (h, w) of each feature map.
     """
-    def __init__(self,
-                 num_feat_maps: int):
+    def __init__(self, embed_dim: int, sizes: list[tuple[int, int]]):
         super().__init__()
-        self.scale_embeddings = nn.Embedding(1, num_feat_maps)
+        self.register_buffer("positional_encoding_gaussian_matrix", torch.randn((2, embed_dim // 2)),)
+        self.pes = torch.cat([self._compute_pe(size) for size in sizes])
 
-    def forward(self, feats: List[torch.Tensor]) -> List[torch.Tensor]:
-        for scale, feat in enumerate(feats):
-            feat += self.scale_embeddings.weight[:, scale].repeat(feat.shape)
-        return feats
+    def _compute_pe(self, size):
+        h, w = size
+        device: Any = self.positional_encoding_gaussian_matrix.device
+        grid = torch.ones((h, w), device=device, dtype=torch.float32)
+        y_embed = grid.cumsum(dim=0) - 0.5
+        x_embed = grid.cumsum(dim=1) - 0.5
+        y_embed = y_embed / h
+        x_embed = x_embed / w
+
+        coords = torch.stack([x_embed, y_embed], dim=-1)
+        coords = 2 * coords - 1
+        coords = coords.to(self.positional_encoding_gaussian_matrix.dtype)
+        coords = coords @ self.positional_encoding_gaussian_matrix
+        coords = 2 * torch.pi * coords
+        return torch.cat([torch.sin(coords), torch.cos(coords)], dim=-1).flatten(0, 1).unsqueeze(1)
+
+    def forward(self, x: torch.Tensor, *, input_pos: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return x + self.pes.expand(x.shape[0], -1, x.shape[2], -1)
 
 
 class Llama3ScaledRoPE(nn.Module):

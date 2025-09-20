@@ -27,7 +27,8 @@ from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                           TransformerCrossAttentionLayer, FeedForward,
                           TransformerDecoder, TransformerSelfAttentionLayer,
                           FusionLayer, scale_hidden_dim_for_mlp,
-                          Llama3ScaledRoPE, llama3_mlp)
+                          Llama3ScaledRoPE, llama3_mlp,
+                          ChainedPositionEmbeddingRandom)
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -47,7 +48,7 @@ def baseline_decoder(vocab_size: int = 12,
                      attn_dropout: int = 0.0,
                      norm_eps: int = 1e-5,
                      rope_base: int = 10000,
-                     encoder_max_seq_len: int = 12544,  # start of fusion parameters
+                     encoder_sizes: list[tuple[int, int]] = None,  # start of fusion parameters
                      pretrained: Optional[str] = None,
                      **kwargs) -> TransformerDecoder:
     """
@@ -75,6 +76,8 @@ def baseline_decoder(vocab_size: int = 12,
     Returns:
         TransformerDecoder: Instantiation of Llama 3.2 vision decoder.
     """
+    encoder_max_seq_len = sum([x[0] * x[1] for x in encoder_sizes])
+
     config = {'vocab_size': vocab_size,
               'num_layers': num_layers,
               'num_heads': num_heads,
@@ -100,6 +103,8 @@ def baseline_decoder(vocab_size: int = 12,
     layers = []
 
     rope = Llama3ScaledRoPE(dim=head_dim, max_seq_len=config['max_seq_len'], base=config['rope_base'])
+    cross_pos = ChainedPositionEmbeddingRandom(embed_dim=head_dim, sizes=encoder_sizes)
+
     for idx in range(1, num_layers + 1):
 
         # Self attention layers for text decoder
@@ -135,7 +140,8 @@ def baseline_decoder(vocab_size: int = 12,
             output_proj=nn.Linear(config['embed_dim'], config['embed_dim'], bias=False),
             q_norm=RMSNorm(dim=head_dim, eps=1e-05),
             k_norm=RMSNorm(dim=head_dim, eps=1e-05),
-            pos_embeddings=None,
+            pos_embeddings=rope,
+            cross_pos_embeddings=cross_pos,
             max_seq_len=config['encoder_max_seq_len'],
             is_causal=False,
             attn_dropout=0.0,

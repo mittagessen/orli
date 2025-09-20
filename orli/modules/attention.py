@@ -81,6 +81,9 @@ class MultiHeadAttention(nn.Module):
         v_proj (nn.Module): projection layer for value.
         output_proj (nn.Module): projection layer for output.
         pos_embeddings (Optional[nn.Module]): positional embeddings layer, e.g. RotaryPositionalEmbeddings.
+        cross_pos_embeddings (Optional[nn.Module]): positional embeddings layer
+            for cross attention. If defined they will be added onto `k` instead
+            of pos_embeddings.
         q_norm (Optional[nn.Module]): normalization layer for query, e.g. RMSNorm. For decoding, this is applied
             before updating from kv_cache. This means it will only support token wide normalization and not
             batch or sequence wide normalization.
@@ -111,6 +114,7 @@ class MultiHeadAttention(nn.Module):
         v_proj: nn.Module,
         output_proj: nn.Module,
         pos_embeddings: Optional[nn.Module] = None,
+        cross_pos_embeddings: Optional[nn.Module] = None,
         q_norm: Optional[nn.Module] = None,
         k_norm: Optional[nn.Module] = None,
         kv_cache: Optional[KVCache] = None,
@@ -155,6 +159,7 @@ class MultiHeadAttention(nn.Module):
         self.q_norm = q_norm
         self.k_norm = k_norm
         self.pos_embeddings = pos_embeddings
+        self.k_pos_embeddings = pos_embeddings if not cross_pos_embeddings else cross_pos_embeddings
 
         # Use flex attention if supported and we are sample packing
         self._attention_call = _attention_call
@@ -162,6 +167,13 @@ class MultiHeadAttention(nn.Module):
         # this flag indicates whether to update the kv-cache during forward
         # passes. when disabled, we can have the cache setup but still
         # perform normal forward passes
+        self.cache_enabled = False
+
+    def delete_cache(self):
+        """
+        Deletes any cache.
+        """
+        self.kv_cache = None
         self.cache_enabled = False
 
     def setup_cache(
@@ -176,19 +188,15 @@ class MultiHeadAttention(nn.Module):
             max_seq_len (int): maximum sequence length model will be run with.
         """
         # Don't overwrite user defined kv_cache from init
-        if self.kv_cache is not None:
-            logger.warning(
-                "Key value caches are already setup. You cannot call ``setup_caches()`` twice. Skipping."
-            )
-        else:
-            self.kv_cache = KVCache(
-                batch_size=batch_size,
-                max_seq_len=max_seq_len,
-                num_kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
-                dtype=dtype,
-            )
-            self.cache_enabled = True
+        self.kv_cache = KVCache(
+            batch_size=batch_size,
+            max_seq_len=max_seq_len,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=self.head_dim,
+            dtype=dtype,
+        )
+        self.kv_cache.to(next(self.q_proj.parameters()).device)
+        self.cache_enabled = True
 
     def reset_cache(self):
         """Reset the key value caches."""
@@ -286,8 +294,8 @@ class MultiHeadAttention(nn.Module):
             # k,v shape: [b, s_y, n_kv, h_d]
             k = k.view(b, s_y, -1, self.head_dim)
             v = v.view(b, s_y, -1, self.head_dim)
-            if self.pos_embeddings is not None:
-                k = self.pos_embeddings(k, input_pos=input_pos)
+            if self.k_pos_embeddings is not None:
+                k = self.k_pos_embeddings(k, input_pos=input_pos)
 
             # k,v shape: [b, n_kv, s_y, h_d]
             k = k.transpose(1, 2)
