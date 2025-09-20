@@ -16,7 +16,9 @@
 Utility functions for data loading and training of VGSL networks.
 """
 import io
+import gc
 import torch
+import ctypes
 import torch.nn.functional as F
 import lightning.pytorch as L
 
@@ -56,6 +58,10 @@ def collate_curves(batch,
     """
     Concatenates and pads curves.
     """
+    gc.collect()
+    libc = ctypes.CDLL("libc.so.6")
+    libc.malloc_trim(0)
+    gc.collect()
     return {'image': default_collate([item['image'] for item in batch]),
             'tokens': torch.stack([F.pad(x['tokens'], pad=(0, 0, 0, max_lines_in_page-len(x['tokens'])), value=-1) for x in batch]),
             'curves': torch.stack([F.pad(x['curves'], pad=(0, 0, 0, max_lines_in_page-len(x['curves'])), value=-1) for x in batch])}

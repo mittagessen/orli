@@ -201,8 +201,7 @@ def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
     from lightning.pytorch import Trainer
     from lightning.pytorch.callbacks import RichModelSummary, ModelCheckpoint, RichProgressBar
 
-    torch.multiprocessing.set_start_method('spawn', force=True)
-    torch.set_float32_matmul_precision('medium')
+    torch.set_float32_matmul_precision('high')
 
     hyper_params = SEGMENTATION_HYPER_PARAMS.copy()
     hyper_params.update({'freq': freq,
