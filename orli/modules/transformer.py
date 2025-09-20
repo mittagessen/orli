@@ -159,11 +159,6 @@ class TransformerCrossAttentionLayer(nn.Module):
         mlp_scale: Optional[nn.Module] = None,
     ) -> None:
         super().__init__()
-        if attn.pos_embeddings is not None:
-            raise AssertionError(
-                "Doesn't support positional embeddings for cross attention, \
-                because q and k are different sequences."
-            )
         self.attn = attn
         self.mlp = mlp
         self.ca_norm = ca_norm or nn.Identity()
