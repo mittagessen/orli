@@ -43,7 +43,6 @@ def checkpoint_to_kraken(checkpoint_path: Union[str, 'PathLike'],
               "decoder_attn_dropout": 0.0,
               "decoder_norm_eps": 1e-05,
               "decoder_rope_base": 10000,
-              "decoder_encoder_max_seq_len": sum(state_dict['hyper_parameters']['encoder_topk_tokens']),
               "encoder_name": state_dict['hyper_parameters']['encoder'],
               "encoder_input_size": state_dict['hyper_parameters']['encoder_input_size'],
               'encoder_idxs': state_dict['hyper_parameters']['encoder_idxs']}
