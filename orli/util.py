@@ -45,8 +45,8 @@ def checkpoint_to_kraken(checkpoint_path: Union[str, 'PathLike'],
               "decoder_rope_base": 10000,
               "decoder_encoder_max_seq_len": sum(state_dict['hyper_parameters']['encoder_topk_tokens']),
               "encoder_name": state_dict['hyper_parameters']['encoder'],
-              "encoder_topk_tokens": state_dict['hyper_parameters']['encoder_topk_tokens'],
-              "encoder_embed_dim": state_dict['hyper_parameters']['encoder_embed_dim']}
+              "encoder_input_size": state_dict['hyper_parameters']['encoder_input_size'],
+              'encoder_idxs': state_dict['hyper_parameters']['encoder_idxs']}
     model_type = 'kraken_orli'
     metadata = {'model_type': model_type,
                 'config': json.dumps(config)}

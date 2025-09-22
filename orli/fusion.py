@@ -289,8 +289,8 @@ class OrliModel(nn.Module):
 
         with safe_open(filename, framework='pt') as f:
             metadata = f.metadata()
-            if metadata['model_type'] != 'kraken_llama_party':
-                raise ValueError(f'{filename} is not a llama party model. Got type {metadata["model_type"]}, expected: kraken_llama_party.')
+            if metadata['model_type'] != 'kraken_orli':
+                raise ValueError(f'{filename} is not a orli model. Got type {metadata["model_type"]}, expected: orli.')
             config = json.loads(metadata['config'])
             encoder_config = {k[8:]: v for k, v in config.items() if k.startswith('encoder_')}
 
