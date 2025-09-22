@@ -261,7 +261,7 @@ def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
     checkpoint_callback = ModelCheckpoint(dirpath=output,
                                           save_top_k=10,
                                           monitor='global_step',
-                                          mode='min',
+                                          mode='max',
                                           auto_insert_metric_name=False,
                                           filename='checkpoint_{epoch:02d}-{val_metric:.4f}')
 
