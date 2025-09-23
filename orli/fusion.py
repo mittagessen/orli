@@ -305,7 +305,9 @@ class OrliModel(nn.Module):
                           int(encoder_config['input_size'][1]/encoder_model.feature_info.reduction(idx)),
                           encoder_model.feature_info.channels(idx)) for idx in encoder_config['idxs']]
 
-        decoder_model = baseline_decoder(encoder_sizes=[x[:2] for x in encoder_sizes])
+        encoder_max_seq_len = sum([x[0] * x[1] for x in encoder_sizes])
+
+        decoder_model = baseline_decoder(encoder_max_seq_len=encoder_max_seq_len)
 
         model = OrliModel(encoder=encoder_model,
                           decoder=decoder_model,
@@ -432,7 +434,7 @@ class OrliModel(nn.Module):
     def prepare_for_generation(self,
                                bos_id: torch.Tensor = torch.Tensor([1]).long(),
                                batch_size: int = 1,
-                               max_encoder_seq_len: int = 12544,
+                               max_encoder_seq_len: int = 56700,
                                max_generated_tokens: int = 768,
                                device: torch.device = torch.device('cpu')):
 
@@ -498,7 +500,6 @@ class OrliModel(nn.Module):
                               input_pos=self._input_pos[:, :1].squeeze())
         tokens = torch.argmax(logits['tokens'], dim=-1)
         curves = logits['curves']
-        generated_tokens = [tokens[:, -1]]
         generated_curves = [curves[:, -1]]
 
         curr_pos = 1
@@ -522,15 +523,14 @@ class OrliModel(nn.Module):
                                                     curves], dim=-1),
                                   mask=curr_masks,
                                   input_pos=curr_input_pos)
-            print(f'tokens: {logits["tokens"]} curves: {logits["curves"]}')
             tokens = torch.argmax(logits['tokens'], dim=-1)
             curves = logits['curves']
-            generated_tokens.append(tokens[:, -1])
             generated_curves.append(curves[:, -1])
 
             curr_pos += 1
 
             eos_token_reached |= tokens[:, -1] == eos_token
+
             logger.info(f'Generated tokens: {tokens} Generated curves: {curves}')
 
             if eos_token_reached.all():
