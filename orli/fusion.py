@@ -240,14 +240,21 @@ class CurveHead(nn.Module):
     """
     def __init__(self,
                  embed_dim: int = 576,
-                 num_cls: int = 4):
+                 num_cls: int = 4,
+                 num_layers: int = 3,
+                 hidden_dim: int ):
         super().__init__()
         self.cls_proj = nn.Linear(embed_dim, num_cls, bias=False)
-        self.reg_proj = nn.Linear(embed_dim, 8, bias=False)
+        self.reg_proj = nn.Sequential()
+        if num_layers > 1:
+            for n in range(num_layers-1):
+                self.reg_proj.append(nn.Linear(embed_dim, embed_dim))
+                self.reg_proj.append(nn.SiLU())
+        self.reg_proj.append(nn.Linear(embed_dim, 8))
 
     def forward(self, x) -> Dict[str, torch.Tensor]:
         return {'tokens': self.cls_proj(x),
-                'curves': self.reg_proj(x).sigmoid()}
+                'curves': self.reg_proj(x)}
 
 
 class OrliModel(nn.Module):
