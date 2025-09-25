@@ -59,7 +59,7 @@ def sample_curves(curves: torch.Tensor) -> List[List[Tuple[int, int]]]:
     coeff = np.array(BezierCoeff(samples))
     lines = []
     for curve in curves:
-        curve = np.array(curve)
+        curve = np.array(curve.cpu())
         curve.resize(4, 2)
         lines.append(coeff.dot(curve))
     return lines
@@ -96,7 +96,7 @@ def segment(model: 'OrliModel',
         curves = model.predict(encoder_input=image_input).squeeze()
         # strip trailing no-op if it is there.
         if not curves[-1].any():
-            curves = curves[:-1]
+           curves = curves[:-1]
         curves *= curve_scale
     lines = sample_curves(curves)
 
