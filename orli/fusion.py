@@ -247,7 +247,7 @@ class CurveHead(nn.Module):
         self.reg_proj = nn.Sequential()
         if num_layers > 1:
             for n in range(num_layers-1):
-                self.reg_proj.append(nn.Linear(embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
+                self.reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
                 self.reg_proj.append(nn.SiLU())
         self.reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, 8))
 
