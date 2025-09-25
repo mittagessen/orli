@@ -286,6 +286,7 @@ class OrliModel(nn.Module):
         """
         import timm
         from safetensors import safe_open
+        from safetensors.torch import load_model
 
         with safe_open(filename, framework='pt') as f:
             metadata = f.metadata()
@@ -293,8 +294,6 @@ class OrliModel(nn.Module):
                 raise ValueError(f'{filename} is not a orli model. Got type {metadata["model_type"]}, expected: orli.')
             config = json.loads(metadata['config'])
             encoder_config = {k[8:]: v for k, v in config.items() if k.startswith('encoder_')}
-
-            state_dict = {k: f.get_tensor(k) for k in f.keys()}
 
         encoder_model = timm.create_model(encoder_config['name'],
                                           pretrained=False,
@@ -305,17 +304,15 @@ class OrliModel(nn.Module):
                           int(encoder_config['input_size'][1]/encoder_model.feature_info.reduction(idx)),
                           encoder_model.feature_info.channels(idx)) for idx in encoder_config['idxs']]
 
-        encoder_max_seq_len = sum([x[0] * x[1] for x in encoder_sizes])
-
-        decoder_model = baseline_decoder(encoder_max_seq_len=encoder_max_seq_len)
+        decoder_model = baseline_decoder(encoder_sizes=[x[:2] for x in encoder_sizes])
 
         model = OrliModel(encoder=encoder_model,
                           decoder=decoder_model,
                           encoder_embed_dims=[x[2] for x in encoder_sizes],
                           decoder_embed_dim=decoder_model.tok_embeddings.out_features)
 
-        model.load_state_dict(state_dict)
-
+        # load shared tensors 
+        load_model(model, 'orli_base.safetensors')
         return model
 
     def setup_caches(self,
