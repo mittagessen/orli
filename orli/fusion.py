@@ -241,16 +241,15 @@ class CurveHead(nn.Module):
     def __init__(self,
                  embed_dim: int = 576,
                  num_cls: int = 4,
-                 num_layers: int = 3,
-                 hidden_dim: int ):
+                 num_layers: int = 3):
         super().__init__()
         self.cls_proj = nn.Linear(embed_dim, num_cls, bias=False)
         self.reg_proj = nn.Sequential()
         if num_layers > 1:
             for n in range(num_layers-1):
-                self.reg_proj.append(nn.Linear(embed_dim, embed_dim))
+                self.reg_proj.append(nn.Linear(embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
                 self.reg_proj.append(nn.SiLU())
-        self.reg_proj.append(nn.Linear(embed_dim, 8))
+        self.reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, 8))
 
     def forward(self, x) -> Dict[str, torch.Tensor]:
         return {'tokens': self.cls_proj(x),
@@ -318,7 +317,7 @@ class OrliModel(nn.Module):
                           encoder_embed_dims=[x[2] for x in encoder_sizes],
                           decoder_embed_dim=decoder_model.tok_embeddings.out_features)
 
-        # load shared tensors 
+        # load shared tensors
         load_model(model, 'orli_base.safetensors')
         return model
 
