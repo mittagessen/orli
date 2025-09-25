@@ -18,6 +18,7 @@ orli.pred
 
 API for inference
 """
+import uuid
 import torch
 import logging
 import numpy as np
@@ -25,6 +26,7 @@ import numpy as np
 from dataclasses import asdict
 
 from scipy.special import comb
+from shapely.geometry import LineString
 from kraken.containers import Segmentation, BaselineLine
 
 from typing import TYPE_CHECKING, Union, Tuple, Optional, Literal, Generator, List
@@ -80,7 +82,7 @@ def segment(model: 'OrliModel',
     m_dtype = next(model.parameters()).dtype
     m_device = next(model.parameters()).device
 
-    curve_scale = torch.tensor(im.size * 4)
+    curve_scale = torch.tensor((im.width, im.height) * 4)
 
     # load image transforms
     im_transforms = get_default_transforms(dtype=m_dtype)
@@ -97,5 +99,21 @@ def segment(model: 'OrliModel',
             curves = curves[:-1]
         curves *= curve_scale
     lines = sample_curves(curves)
-    print(f'lines_shape: {lines[0].shape}\nlines: {len(lines)}')
-    return lines
+
+    line_containers = []
+    for line in lines:
+        boundary = LineString(line).buffer(-10, single_sided=True)
+        boundary = np.array(boundary.boundary.coords)
+        boundary = np.rint(boundary).astype('int')
+        boundary = tuple(map(tuple, boundary.tolist()))
+        line = np.rint(line).astype('int')
+        baseline = tuple(map(tuple, line.tolist()))
+        line_containers.append(BaselineLine(id=f'_{uuid.uuid4()}',
+                                            baseline=baseline,
+                                            boundary=boundary,
+                                            tags={'type': [{'type': 'default'}]}))
+    return Segmentation(type='baselines',
+                        imagename=im.filename,
+                        script_detection=False,
+                        text_direction='horizontal-lr',
+                        lines=line_containers)

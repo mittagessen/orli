@@ -54,7 +54,7 @@ logger = logging.getLogger('orli')
               'output. Native are plain image files for image, JSON for '
               'segmentation, and text for transcription output.',
               flag_value='hocr')
-@click.option('-a', '--alto', 'serializer', flag_value='alto')
+@click.option('-a', '--alto', 'serializer', flag_value='alto', default=True)
 @click.option('-y', '--abbyy', 'serializer', flag_value='abbyyxml')
 @click.option('-x', '--pagexml', 'serializer', flag_value='pagexml')
 @click.option('--compile/--no-compile', help='Switch to enable/disable torch.compile() on model', default=True, show_default=True)
@@ -127,7 +127,13 @@ def segment(ctx, input, batch_input, suffix, load_from_repo, load_from_file,
 
     with torch.inference_mode(), threadpool_limits(limits=ctx.meta['threads']), fabric.init_tensor(), fabric.init_module():
 
-        model = OrliModel.from_safetensors(load_from_file)
+        if load_from_file.endswith('.ckpt'):
+            # Load segmentation model from checkpoint
+            from orli.model import SegmentationModel
+            segmentation_model = SegmentationModel.load_from_checkpoint(load_from_file)
+            model = fabric.setup_module(segmentation_model).model  # Get the underlying OrliModel
+        else:
+            model = OrliModel.from_safetensors(load_from_file)
 
         if compile:
             click.echo('Compiling model ', nl=False)
