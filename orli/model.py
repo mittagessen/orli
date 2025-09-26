@@ -175,10 +175,10 @@ class SegmentationModel(L.LightningModule):
     def configure_callbacks(self):
         callbacks = []
         if self.hparams.quit == 'early':
-            callbacks.append(EarlyStopping(monitor='val_accuracy',
-                                           mode='max',
+            callbacks.append(EarlyStopping(monitor='val_metric',
+                                           mode='min',
                                            patience=self.hparams.lag,
-                                           stopping_threshold=1.0))
+                                           stopping_threshold=0.0))
 
         return callbacks
 
@@ -276,7 +276,7 @@ def _configure_optimizer_and_lr_scheduler(hparams, params, loss_tracking_mode='m
         ret['lr_scheduler'] = lr_sched
 
     if schedule == 'reduceonplateau':
-        lr_sched['monitor'] = 'val_accuracy'
+        lr_sched['monitor'] = 'val_metric'
         lr_sched['strict'] = False
         lr_sched['reduce_on_plateau'] = True
 
