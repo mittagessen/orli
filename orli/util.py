@@ -15,6 +15,7 @@
 # limitations under the License.
 """Model format conversion routines"""
 import json
+import pathlib
 import torch
 
 from safetensors.torch import save_file, _remove_duplicate_names
@@ -31,6 +32,8 @@ def checkpoint_to_kraken(checkpoint_path: Union[str, 'PathLike'],
     Converts a lightning checkpoint and optional HTRMoPo model card to the new
     safetensors-based kraken serialization format.
     """
+    # Add PosixPath to safe globals for loading checkpoints
+    torch.serialization.add_safe_globals([pathlib.PosixPath])
     state_dict = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=True)
     # we do not have configurable encoders/decoders
     config = {"decoder_vocab_size": 12,
