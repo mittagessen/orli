@@ -39,7 +39,7 @@ __all__ = ['baseline_decoder', 'OrliModel']
 
 
 def baseline_decoder(vocab_size: int = 12,
-                     num_layers: int = 4,
+                     num_layers: int = 12,
                      num_heads: int = 9,
                      num_kv_heads: int = 3,
                      embed_dim: int = 576,
@@ -49,6 +49,7 @@ def baseline_decoder(vocab_size: int = 12,
                      norm_eps: int = 1e-5,
                      rope_base: int = 10000,
                      encoder_sizes: list[tuple[int, int]] = None,  # start of fusion parameters
+                     fusion_interval: int = 3,
                      pretrained: Optional[str] = None,
                      **kwargs) -> TransformerDecoder:
     """
@@ -88,7 +89,8 @@ def baseline_decoder(vocab_size: int = 12,
               'attn_dropout': attn_dropout,
               'norm_eps': norm_eps,
               'rope_base': rope_base,
-              'encoder_max_seq_len': encoder_max_seq_len}
+              'encoder_max_seq_len': encoder_max_seq_len,
+              'fusion_interval': fusion_interval}
 
     if pretrained:
         vocab_size = config.pop('vocab_size')
@@ -129,34 +131,37 @@ def baseline_decoder(vocab_size: int = 12,
             mlp_norm=RMSNorm(dim=embed_dim, eps=1e-5),
         )
 
-        attn = MultiHeadAttention(
-            embed_dim=config['embed_dim'],
-            num_heads=config['num_heads'],
-            num_kv_heads=config['num_kv_heads'],
-            head_dim=head_dim,
-            q_proj=nn.Linear(config['embed_dim'], config['num_heads'] * head_dim, bias=False),
-            k_proj=nn.Linear(config['embed_dim'], config['num_kv_heads'] * head_dim, bias=False),
-            v_proj=nn.Linear(config['embed_dim'], config['num_kv_heads'] * head_dim, bias=False),
-            output_proj=nn.Linear(config['embed_dim'], config['embed_dim'], bias=False),
-            q_norm=RMSNorm(dim=head_dim, eps=1e-05),
-            k_norm=RMSNorm(dim=head_dim, eps=1e-05),
-            pos_embeddings=rope,
-            cross_pos_embeddings=cross_pos,
-            max_seq_len=config['encoder_max_seq_len'],
-            is_causal=False,
-            attn_dropout=0.0,
-        )
+        if idx % config['fusion_interval'] == 0:
+            attn = MultiHeadAttention(
+                embed_dim=config['embed_dim'],
+                num_heads=config['num_heads'],
+                num_kv_heads=config['num_kv_heads'],
+                head_dim=head_dim,
+                q_proj=nn.Linear(config['embed_dim'], config['num_heads'] * head_dim, bias=False),
+                k_proj=nn.Linear(config['embed_dim'], config['num_kv_heads'] * head_dim, bias=False),
+                v_proj=nn.Linear(config['embed_dim'], config['num_kv_heads'] * head_dim, bias=False),
+                output_proj=nn.Linear(config['embed_dim'], config['embed_dim'], bias=False),
+                q_norm=RMSNorm(dim=head_dim, eps=1e-05),
+                k_norm=RMSNorm(dim=head_dim, eps=1e-05),
+                pos_embeddings=rope,
+                cross_pos_embeddings=cross_pos,
+                max_seq_len=config['encoder_max_seq_len'],
+                is_causal=False,
+                attn_dropout=0.0,
+            )
 
-        mlp = llama3_mlp(dim=config['embed_dim'], hidden_dim=hidden_dim)
-        xattn_layer = TransformerCrossAttentionLayer(
-            attn=attn,
-            mlp=mlp,
-            ca_norm=RMSNorm(dim=embed_dim),
-            mlp_norm=RMSNorm(dim=embed_dim),
-            ca_scale=TanhGate(),
-            mlp_scale=TanhGate(),
-        )
-        layers.append(FusionLayer(layer=decoder_layer, fusion_layer=xattn_layer))
+            mlp = llama3_mlp(dim=config['embed_dim'], hidden_dim=hidden_dim)
+            xattn_layer = TransformerCrossAttentionLayer(
+                attn=attn,
+                mlp=mlp,
+                ca_norm=RMSNorm(dim=embed_dim),
+                mlp_norm=RMSNorm(dim=embed_dim),
+                ca_scale=TanhGate(),
+                mlp_scale=TanhGate(),
+            )
+            layers.append(FusionLayer(layer=decoder_layer, fusion_layer=xattn_layer))
+        else:
+            layers.append(decoder_layer)
 
     line_embeddings = nn.Linear(config['vocab_size'], config['embed_dim'], bias=False)
     output_proj = CurveHead(config['embed_dim'])
