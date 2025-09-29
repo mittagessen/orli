@@ -16,7 +16,7 @@
 """Llama vision fusion model"""
 
 import logging
-from typing import Generator, Optional, Union, List, Dict, TYPE_CHECKING
+from typing import Generator, Optional, Union, List, TYPE_CHECKING
 
 import json
 import torch
@@ -29,6 +29,7 @@ from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                           FusionLayer, scale_hidden_dim_for_mlp,
                           Llama3ScaledRoPE, llama3_mlp,
                           ChainedPositionEmbeddingRandom)
+from orli.modules.transformer import _get_clones
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -39,7 +40,7 @@ __all__ = ['baseline_decoder', 'OrliModel']
 
 
 def baseline_decoder(vocab_size: int = 12,
-                     num_layers: int = 12,
+                     num_layers: int = 4,
                      num_heads: int = 9,
                      num_kv_heads: int = 3,
                      embed_dim: int = 576,
@@ -49,11 +50,12 @@ def baseline_decoder(vocab_size: int = 12,
                      norm_eps: int = 1e-5,
                      rope_base: int = 10000,
                      encoder_sizes: list[tuple[int, int]] = None,  # start of fusion parameters
-                     fusion_interval: int = 3,
+                     fusion_interval: int = 1,
                      pretrained: Optional[str] = None,
                      **kwargs) -> TransformerDecoder:
     """
-    Builds a decoder regression baselines.
+    Builds a decoder regressing baselines as cubic Bézier curves using
+    iterative refinement.
 
     Args:
         vocab_size (int): dimensionality of baseline encoding
@@ -164,7 +166,7 @@ def baseline_decoder(vocab_size: int = 12,
             layers.append(decoder_layer)
 
     line_embeddings = nn.Linear(config['vocab_size'], config['embed_dim'], bias=False)
-    output_proj = CurveHead(config['embed_dim'])
+    output_proj = CurveClassificationHead(config['embed_dim'])
 
     decoder = TransformerDecoder(tok_embeddings=line_embeddings,
                                  layers=layers,
@@ -172,7 +174,8 @@ def baseline_decoder(vocab_size: int = 12,
                                  num_heads=config['num_heads'],
                                  head_dim=head_dim,
                                  norm=RMSNorm(config['embed_dim'], eps=1e-05),
-                                 output=output_proj)
+                                 output=output_proj,
+                                 output_hidden_states=list(range(num_layers)))
 
     if pretrained:
         weight_path = hf_hub_download(repo_id=pretrained, filename='model.safetensors')
@@ -239,26 +242,50 @@ class OrliAdapter(nn.Module):
         return torch.cat(os, dim=1)
 
 
-class CurveHead(nn.Module):
+class CurveClassificationHead(nn.Module):
     """
-    Classification and regression head for baseline curves.
+    Classification head for baseline curves.
     """
     def __init__(self,
                  embed_dim: int = 576,
                  num_cls: int = 4,
                  num_layers: int = 3):
         super().__init__()
-        self.cls_proj = nn.Linear(embed_dim, num_cls, bias=False)
-        self.reg_proj = nn.Sequential()
+        self.cls_proj = nn.Sequential()
         if num_layers > 1:
             for n in range(num_layers-1):
-                self.reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
-                self.reg_proj.append(nn.SiLU())
-        self.reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, 8))
+                self.cls_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
+                self.cls_proj.append(nn.SiLU())
+        self.cls_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, num_cls))
 
-    def forward(self, x) -> Dict[str, torch.Tensor]:
-        return {'tokens': self.cls_proj(x),
-                'curves': self.reg_proj(x)}
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.cls_proj(x)
+
+
+class CurveRegressionHead(nn.Module):
+    """
+    Iterative refinement regression head for baseline curves.
+    """
+    def __init__(self,
+                 embed_dim: int = 576,
+                 num_cls: int = 4,
+                 num_layers: int = 3,
+                 num_iterations: int = 4):
+        super().__init__()
+        reg_proj = nn.Sequential()
+        if num_layers > 1:
+            for n in range(num_layers-1):
+                reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
+                reg_proj.append(nn.SiLU())
+        reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, 8))
+        self.reg_projs = _get_clones(reg_proj, num_iterations)
+
+    def forward(self, xs: list[torch.Tensor]) -> torch.Tensor:
+        reference = torch.zeros(xs[0].shape[:2] + (8, ), dtype=xs[0].dtype, device=xs[0].device)
+        for proj, layer in zip(self.reg_projs, xs):
+            tmp = proj(layer)
+            tmp += reference
+        return tmp
 
 
 class OrliModel(nn.Module):
@@ -287,6 +314,9 @@ class OrliModel(nn.Module):
                                    adapter_num_heads,
                                    encoder_embed_dims,
                                    decoder_embed_dim)
+
+        self.curve_reg = CurveRegressionHead(embed_dim=decoder_embed_dim,
+                                             num_iterations=len(decoder.layers))
 
         self.ready_for_generation = False
 
@@ -428,7 +458,8 @@ class OrliModel(nn.Module):
                               encoder_input=encoder_hidden_states,
                               encoder_mask=encoder_mask,
                               input_pos=input_pos)
-        return output
+        return {'curves': self.curve_reg(output[:-1]),
+                'tokens': output[-1]}
 
     def forward_encoder_embeddings(self, encoder_input):
         """
