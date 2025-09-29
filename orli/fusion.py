@@ -281,11 +281,11 @@ class CurveRegressionHead(nn.Module):
         self.reg_projs = _get_clones(reg_proj, num_iterations)
 
     def forward(self, xs: list[torch.Tensor]) -> torch.Tensor:
-        reference = torch.zeros(xs[0].shape[:2] + (8, ), dtype=xs[0].dtype, device=xs[0].device)
+        curve = torch.zeros(xs[0].shape[:2] + (8, ), dtype=xs[0].dtype, device=xs[0].device)
         for proj, layer in zip(self.reg_projs, xs):
-            tmp = proj(layer)
-            tmp += reference
-        return tmp
+            curve = curve.detach()
+            curve += proj(layer)
+        return curve 
 
 
 class OrliModel(nn.Module):
