@@ -174,7 +174,7 @@ def baseline_decoder(vocab_size: int = 12,
                                  head_dim=head_dim,
                                  norm=RMSNorm(config['embed_dim'], eps=1e-05),
                                  output=nn.Identity(),
-                                 output_hidden_states=list(range(num_layers)))
+                                 output_hidden_states=list(range(num_layers-1)))
 
     if pretrained:
         weight_path = hf_hub_download(repo_id=pretrained, filename='model.safetensors')
@@ -282,8 +282,8 @@ class CurveRegressionHead(nn.Module):
             curves = _curves[-1].detach()
             _logits.append(cls_proj(layer))
             _curves.append(curves + reg_proj(layer))
-            
-        return {'curves': torch.stack(_curves),
+
+        return {'curves': torch.stack(_curves[1:]),
                 'tokens': torch.stack(_logits)}
 
 
@@ -457,7 +457,7 @@ class OrliModel(nn.Module):
                               encoder_input=encoder_hidden_states,
                               encoder_mask=encoder_mask,
                               input_pos=input_pos)
-        return self.curve_reg(output[:-1])
+        return self.curve_reg(output)
 
     def forward_encoder_embeddings(self, encoder_input):
         """

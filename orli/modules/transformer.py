@@ -623,8 +623,6 @@ class TransformerDecoder(nn.Module):
 
         hidden = []
         for i, layer in enumerate(self.layers):
-            if i in self.output_hidden_states:
-                hidden.append(h)
             # shape: [b, s, d]
             h = layer(
                 h,
@@ -633,6 +631,8 @@ class TransformerDecoder(nn.Module):
                 encoder_mask=encoder_mask,
                 input_pos=input_pos,
             )
+            if i in self.output_hidden_states:
+                hidden.append(h)
 
         # shape: [b, s, d]
         h = self.norm(h)
