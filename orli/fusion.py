@@ -166,7 +166,6 @@ def baseline_decoder(vocab_size: int = 12,
             layers.append(decoder_layer)
 
     line_embeddings = nn.Linear(config['vocab_size'], config['embed_dim'], bias=False)
-    output_proj = CurveClassificationHead(config['embed_dim'])
 
     decoder = TransformerDecoder(tok_embeddings=line_embeddings,
                                  layers=layers,
@@ -174,7 +173,7 @@ def baseline_decoder(vocab_size: int = 12,
                                  num_heads=config['num_heads'],
                                  head_dim=head_dim,
                                  norm=RMSNorm(config['embed_dim'], eps=1e-05),
-                                 output=output_proj,
+                                 output=nn.Identity(),
                                  output_hidden_states=list(range(num_layers)))
 
     if pretrained:
@@ -241,31 +240,11 @@ class OrliAdapter(nn.Module):
             os.append(self.adapter[idx](hidden_state))
         return torch.cat(os, dim=1)
 
-
-class CurveClassificationHead(nn.Module):
-    """
-    Classification head for baseline curves.
-    """
-    def __init__(self,
-                 embed_dim: int = 576,
-                 num_cls: int = 4,
-                 num_layers: int = 3):
-        super().__init__()
-        self.cls_proj = nn.Sequential()
-        if num_layers > 1:
-            for n in range(num_layers-1):
-                self.cls_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
-                self.cls_proj.append(nn.SiLU())
-        self.cls_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, num_cls))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.cls_proj(x)
-
-
 class CurveRegressionHead(nn.Module):
     """
     Iterative refinement regression head for baseline curves.
     """
+
     def __init__(self,
                  embed_dim: int = 576,
                  num_cls: int = 4,
@@ -273,19 +252,39 @@ class CurveRegressionHead(nn.Module):
                  num_iterations: int = 4):
         super().__init__()
         reg_proj = nn.Sequential()
+        cls_proj = nn.Sequential()
+
         if num_layers > 1:
             for n in range(num_layers-1):
                 reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
                 reg_proj.append(nn.SiLU())
+                cls_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
+                cls_proj.append(nn.SiLU())
         reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, 8))
+        cls_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, num_cls))
         self.reg_projs = _get_clones(reg_proj, num_iterations)
+        self.cls_projs = _get_clones(cls_proj, num_iterations)
 
-    def forward(self, xs: list[torch.Tensor]) -> torch.Tensor:
-        curve = torch.zeros(xs[0].shape[:2] + (8, ), dtype=xs[0].dtype, device=xs[0].device)
-        for proj, layer in zip(self.reg_projs, xs):
-            curve = curve.detach()
-            curve += proj(layer)
-        return curve 
+    def forward(self, xs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+        """
+        Args:
+            xs: A list containing `num_iterations` tensors of shape 
+                ``[* x d_e]`` where ``d_e`` is the decoder embedding dim.
+
+        Returns:
+            A dictionary containing an output tensor with shape ``[num_iterations x * x 8]``
+            under the key `curves` and the class logits in `tokens` with shape
+            ``[num_iterations x * x * num_cls]``.
+        """
+        _curves: list[torch.Tensor] = [torch.zeros(xs[0].shape[:2] + (8, ), dtype=xs[0].dtype, device=xs[0].device)]
+        _logits: list[torch.Tensor] = []
+        for cls_proj, reg_proj, layer in zip(self.cls_projs, self.reg_projs, xs):
+            curves = _curves[-1].detach()
+            _logits.append(cls_proj(layer))
+            _curves.append(curves + reg_proj(layer))
+            
+        return {'curves': torch.stack(_curves),
+                'tokens': torch.stack(_logits)}
 
 
 class OrliModel(nn.Module):
@@ -458,8 +457,7 @@ class OrliModel(nn.Module):
                               encoder_input=encoder_hidden_states,
                               encoder_mask=encoder_mask,
                               input_pos=input_pos)
-        return {'curves': self.curve_reg(output[:-1]),
-                'tokens': output[-1]}
+        return self.curve_reg(output[:-1])
 
     def forward_encoder_embeddings(self, encoder_input):
         """

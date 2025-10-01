@@ -37,6 +37,7 @@ def model_step(model,
                cls_criterion,
                curve_criterion,
                batch):
+
     tokens = batch['tokens']
     curves = batch['curves']
     # shift the tokens to create targets
@@ -55,10 +56,13 @@ def model_step(model,
     curves.masked_fill_(curves == -1.0, 0)
 
     logits = model(tokens=torch.cat([tokens, curves], dim=-1), encoder_input=batch['image'])
-
-    pred_tokens = logits['tokens'][target_tokens != -1].view(-1, 4)
-    pred_curves = logits['curves'].view(-1)[target_curves != -1]
-    return 2 * cls_criterion(pred_tokens, target_tokens[target_tokens != -1].view(-1, 4)) + 5 * curve_criterion(pred_curves, target_curves[target_curves != -1])
+    losses = None
+    for pred_curves, pred_tokens in zip(logits['curves'], logits['tokens']):
+        pred_tokens = pred_tokens[target_tokens != -1].view(-1, 4)
+        pred_curves = pred_curves.view(-1)[target_curves != -1]
+        _loss = 2 * cls_criterion(pred_tokens, target_tokens[target_tokens != -1].view(-1, 4)) + 5 * curve_criterion(pred_curves, target_curves[target_curves != -1])
+        losses = _loss if not losses else losses + _loss
+    return losses
 
 
 class SegmentationModel(L.LightningModule):
