@@ -61,8 +61,8 @@ def model_step(model,
         pred_curves = pred_curves.view(-1)[target_curves != -1]
         pred_tokens = pred_tokens[target_tokens != -1].view(-1, 4)
         _loss = 2 * cls_criterion(pred_tokens, target_tokens[target_tokens != -1].view(-1, 4)) + 5 * curve_criterion(pred_curves, target_curves[target_curves != -1])
-        losses = _loss if not losses else losses + _loss
-    return losses
+        losses = _loss if not losses else losses + (_loss / len(pred_tokens))
+    return losses / len(logits['curves'])
 
 
 class SegmentationModel(L.LightningModule):
