@@ -535,8 +535,8 @@ class OrliModel(nn.Module):
                               encoder_mask=encoder_mask,
                               mask=curr_masks,
                               input_pos=self._input_pos[:, :1].squeeze())
-        tokens = torch.argmax(logits['tokens'], dim=-1)
-        curves = logits['curves']
+        tokens = torch.argmax(logits['tokens'][-1, ...], dim=-1)
+        curves = logits['curves'][-1, ...]
         generated_curves = [curves[:, -1]]
 
         curr_pos = 1
@@ -560,8 +560,8 @@ class OrliModel(nn.Module):
                                                     curves], dim=-1),
                                   mask=curr_masks,
                                   input_pos=curr_input_pos)
-            tokens = torch.argmax(logits['tokens'], dim=-1)
-            curves = logits['curves']
+            tokens = torch.argmax(logits['tokens'][-1, ...], dim=-1)
+            curves = logits['curves'][-1, ...]
             generated_curves.append(curves[:, -1])
 
             curr_pos += 1
