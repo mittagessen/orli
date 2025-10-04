@@ -27,8 +27,7 @@ from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                           TransformerCrossAttentionLayer, FeedForward,
                           TransformerDecoder, TransformerSelfAttentionLayer,
                           FusionLayer, scale_hidden_dim_for_mlp,
-                          Llama3ScaledRoPE, llama3_mlp,
-                          ChainedPositionEmbeddingRandom)
+                          Llama3ScaledRoPE, llama3_mlp)
 from orli.modules.transformer import _get_clones
 
 if TYPE_CHECKING:
@@ -238,6 +237,14 @@ class OrliAdapter(nn.Module):
             os.append(self.adapter[idx](hidden_state))
         return torch.cat(os, dim=1)
 
+
+def inverse_sigmoid(x, eps=1e-5):
+    x = x.clamp(min=0, max=1)
+    x1 = x.clamp(min=eps)
+    x2 = (1 - x).clamp(min=eps)
+    return torch.log(x1/x2)
+
+
 class CurveRegressionHead(nn.Module):
     """
     Iterative refinement regression head for baseline curves.
@@ -263,7 +270,7 @@ class CurveRegressionHead(nn.Module):
     def forward(self, xs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         """
         Args:
-            xs: A list containing `num_iterations` tensors of shape 
+            xs: A list containing `num_iterations` tensors of shape
                 ``[* x d_e]`` where ``d_e`` is the decoder embedding dim.
 
         Returns:
@@ -276,7 +283,7 @@ class CurveRegressionHead(nn.Module):
         for cls_proj, reg_proj, layer in zip(self.cls_projs, self.reg_projs, xs):
             curves = _curves[-1].detach()
             _logits.append(cls_proj(layer))
-            _curves.append(curves + reg_proj(layer))
+            _curves.append((inverse_sigmoid(curves) + reg_proj(layer)).sigmoid())
 
         return {'curves': torch.stack(_curves[1:]),
                 'tokens': torch.stack(_logits)}

@@ -20,8 +20,10 @@ import torch
 import logging
 import lightning.pytorch as L
 
+from functools import partial
 from lightning.pytorch.callbacks import EarlyStopping
 from torch.optim import lr_scheduler
+from torchvision.ops import sigmoid_focal_loss
 from torchmetrics.aggregation import MeanMetric
 
 from typing import Literal, Optional
@@ -121,8 +123,8 @@ class SegmentationModel(L.LightningModule):
         self.model.train()
 
         self.val_mean = MeanMetric()
-        self.curve_criterion = torch.nn.MSELoss()
-        self.cls_criterion = torch.nn.CrossEntropyLoss()
+        self.curve_criterion = torch.nn.L1Loss(reduction='sum')
+        self.cls_criterion = partial(sigmoid_focal_loss, reduction='sum')
 
     def forward(self, x):
         return self.model(pixel_values=x)
