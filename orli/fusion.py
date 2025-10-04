@@ -40,7 +40,7 @@ __all__ = ['baseline_decoder', 'OrliModel']
 
 
 def baseline_decoder(vocab_size: int = 12,
-                     num_layers: int = 4,
+                     num_layers: int = 24,
                      num_heads: int = 9,
                      num_kv_heads: int = 3,
                      embed_dim: int = 576,
@@ -107,7 +107,6 @@ def baseline_decoder(vocab_size: int = 12,
     layers = []
 
     rope = Llama3ScaledRoPE(dim=head_dim, max_seq_len=config['max_seq_len'], base=config['rope_base'])
-    cross_pos = ChainedPositionEmbeddingRandom(embed_dim=head_dim, sizes=encoder_sizes)
 
     for idx in range(1, num_layers + 1):
 
@@ -146,7 +145,6 @@ def baseline_decoder(vocab_size: int = 12,
                 q_norm=RMSNorm(dim=head_dim, eps=1e-05),
                 k_norm=RMSNorm(dim=head_dim, eps=1e-05),
                 pos_embeddings=rope,
-                cross_pos_embeddings=cross_pos,
                 max_seq_len=config['encoder_max_seq_len'],
                 is_causal=False,
                 attn_dropout=0.0,
@@ -252,16 +250,13 @@ class CurveRegressionHead(nn.Module):
                  num_iterations: int = 4):
         super().__init__()
         reg_proj = nn.Sequential()
-        cls_proj = nn.Sequential()
 
         if num_layers > 1:
             for n in range(num_layers-1):
                 reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
                 reg_proj.append(nn.SiLU())
-                cls_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
-                cls_proj.append(nn.SiLU())
         reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, 8))
-        cls_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, num_cls))
+        cls_proj = nn.Linear(embed_dim, num_cls)
         self.reg_projs = _get_clones(reg_proj, num_iterations)
         self.cls_projs = _get_clones(cls_proj, num_iterations)
 
