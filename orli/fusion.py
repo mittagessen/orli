@@ -39,7 +39,7 @@ __all__ = ['baseline_decoder', 'OrliModel']
 
 
 def baseline_decoder(vocab_size: int = 12,
-                     num_layers: int = 24,
+                     num_layers: int = 12,
                      num_heads: int = 9,
                      num_kv_heads: int = 3,
                      embed_dim: int = 576,
@@ -49,7 +49,7 @@ def baseline_decoder(vocab_size: int = 12,
                      norm_eps: int = 1e-5,
                      rope_base: int = 10000,
                      encoder_sizes: list[tuple[int, int]] = None,  # start of fusion parameters
-                     fusion_interval: int = 1,
+                     fusion_interval: int = 2,
                      pretrained: Optional[str] = None,
                      **kwargs) -> TransformerDecoder:
     """
@@ -171,7 +171,7 @@ def baseline_decoder(vocab_size: int = 12,
                                  head_dim=head_dim,
                                  norm=RMSNorm(config['embed_dim'], eps=1e-05),
                                  output=nn.Identity(),
-                                 output_hidden_states=list(range(num_layers-1)))
+                                 output_hidden_states=list(range(0, num_layers-1, 2)))
 
     if pretrained:
         weight_path = hf_hub_download(repo_id=pretrained, filename='model.safetensors')
@@ -317,7 +317,7 @@ class OrliModel(nn.Module):
                                    decoder_embed_dim)
 
         self.curve_reg = CurveRegressionHead(embed_dim=decoder_embed_dim,
-                                             num_iterations=len(decoder.layers))
+                                             num_iterations=len(decoder.output_hidden_states) + 1)
 
         self.ready_for_generation = False
 
