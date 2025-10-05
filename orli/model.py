@@ -245,8 +245,8 @@ def _configure_optimizer_and_lr_scheduler(hparams, params, loss_tracking_mode='m
     if optimizer in ['Adam', 'AdamW']:
         optim = getattr(torch.optim, optimizer)(params, lr=lr, weight_decay=weight_decay)
     elif optimizer in ['Adam8bit', 'Adam4bit', 'AdamW8bit', 'AdamW4bit', 'AdamWFp8']:
-        import torchao.prototype.low_bit_optim
-        optim = getattr(torchao.prototype.low_bit_optim, optimizer)(params, lr=lr, weight_decay=weight_decay)
+        import torchao.optim
+        optim = getattr(torchao.optim, optimizer)(params, lr=lr, weight_decay=weight_decay)
     elif optimizer == 'Mars':
         from timm.optim import Mars
         optim = Mars(params, lr=lr, weight_decay=weight_decay, caution=True)
