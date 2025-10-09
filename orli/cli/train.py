@@ -243,7 +243,8 @@ def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
         raise click.BadOptionUsage('device', str(e))
 
     if hyper_params['freq'] > 1:
-        val_check_interval = {'check_val_every_n_epoch': int(hyper_params['freq'])}
+        val_check_interval = {'check_val_every_n_epoch': int(hyper_params['freq']),
+                              'reload_dataloaders_every_n_epochs': int(hyper_params['freq'])}
     else:
         val_check_interval = {'val_check_interval': hyper_params['freq']}
 
