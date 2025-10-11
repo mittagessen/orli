@@ -284,7 +284,7 @@ def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
                       num_sanity_val_steps=0,
                       **val_check_interval)
 
-    with trainer.init_module():
+    with trainer.init_module(empty=False if train_from_scratch else True):
         if train_from_scratch:
             message('Initializing new model.')
             model = SegmentationModel(**hyper_params)
