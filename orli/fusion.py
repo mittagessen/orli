@@ -238,13 +238,6 @@ class OrliAdapter(nn.Module):
         return torch.cat(os, dim=1)
 
 
-def inverse_sigmoid(x, eps=1e-5):
-    x = x.clamp(min=0, max=1)
-    x1 = x.clamp(min=eps)
-    x2 = (1 - x).clamp(min=eps)
-    return torch.log(x1/x2)
-
-
 class CurveRegressionHead(nn.Module):
     """
     Iterative refinement regression head for baseline curves.
@@ -266,6 +259,7 @@ class CurveRegressionHead(nn.Module):
         cls_proj = nn.Linear(embed_dim, num_cls)
         self.reg_projs = _get_clones(reg_proj, num_iterations)
         self.cls_projs = _get_clones(cls_proj, num_iterations)
+        self.register_buffer('curve_anchor', torch.tensor([3.6980e-01, 1.5557e+09, 4.5427e-01, 1.5557e+09, 5.3895e-01, 1.5557e+09, 6.2346e-01, 1.5557e+09]))
 
     def forward(self, xs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         """
@@ -278,12 +272,12 @@ class CurveRegressionHead(nn.Module):
             under the key `curves` and the class logits in `tokens` with shape
             ``[num_iterations x * x * num_cls]``.
         """
-        _curves: list[torch.Tensor] = [torch.zeros(xs[0].shape[:2] + (8, ), dtype=xs[0].dtype, device=xs[0].device)]
+        _curves: list[torch.Tensor] = [self.curve_anchor]
         _logits: list[torch.Tensor] = []
         for cls_proj, reg_proj, layer in zip(self.cls_projs, self.reg_projs, xs):
             curves = _curves[-1].detach()
             _logits.append(cls_proj(layer))
-            _curves.append((inverse_sigmoid(curves) + reg_proj(layer)).sigmoid())
+            _curves.append(curves + reg_proj(layer))
 
         return {'curves': torch.stack(_curves[1:]),
                 'tokens': torch.stack(_logits)}
