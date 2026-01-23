@@ -84,7 +84,7 @@ def model_step(model,
         batch_target_tokens = target_tokens[valid_targets_mask]
 
         # create target for classification loss
-        target_for_cls = torch.zeros_like(pred_tokens)
+        target_for_cls = torch.zeros_like(pred_tokens, dtype=batch_target_tokens.dtype)
         item_indices = torch.arange(pred_tokens.shape[0])
         target_for_cls[item_indices, best_anchor_idx] = batch_target_tokens
         cls_loss = cls_criterion(pred_tokens, target_for_cls)
