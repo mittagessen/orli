@@ -3,7 +3,6 @@ device: auto
 num_workers: 16
 num_threads: 1
 train:
-  train_from_scratch: true
   # training data manifests
   training_data:
      - /home/bkiessling/all_train.lst
@@ -17,11 +16,10 @@ train:
   epochs: 24
   lrate: 5e-4
   schedule: cosine
-  cos_max: 24
+  cos_t_max: 24
   cos_min_lr: 5e-6
   warmup: 1000
   augment: true
-  validate_before_train: false
   # effective batch size params
   batch_size: 8
   val_batch_size: 8
