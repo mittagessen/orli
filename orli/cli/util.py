@@ -22,6 +22,7 @@ import os
 import yaml
 import glob
 import logging
+import difflib
 from typing import Optional
 
 import click
