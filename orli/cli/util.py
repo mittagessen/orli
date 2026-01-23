@@ -18,28 +18,61 @@ orli.cli.util
 
 Command line driver helpers
 """
+import os
+import yaml
 import glob
 import logging
-import os
-from typing import List, Optional, Tuple, Callable, Dict, Any
+from typing import Optional
 
 import click
-import lightning as L
 
-from PIL import Image
-from lightning.pytorch.callbacks import BaseFinetuning
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from os import PathLike
 
 
 logging.captureWarnings(True)
-logger = logging.getLogger('orli')
+logger = logging.getLogger('party')
 
 
-def get_input_parser(type_str: str) -> Callable[[str], Dict[str, Any]]:
-    if type_str in ['alto', 'page', 'xml']:
-        from kraken.lib.xml import XMLPage
-        return XMLPage
-    elif type_str == 'image':
-        return Image.open
+def _recursive_update(a: dict[str, Any],
+                      b: dict[str, Any]) -> dict[str, Any]:
+    """Like standard ``dict.update()``, but recursive so sub-dict gets updated.
+
+    Warns on keys present in ``b`` but not in ``a`` and suggests alternatives.
+    """
+    for k, v in b.items():
+        if k not in a:
+            matches = difflib.get_close_matches(k, a.keys())
+            msg = f'Ignoring unknown configuration key "{k}" in experiment file.'
+            if matches:
+                msg += f' Did you mean "{matches[0]}"?'
+            logger.warning(msg)
+            continue
+        if isinstance(v, dict) and isinstance(a.get(k), dict):
+            a[k] = _recursive_update(a[k], v)
+        else:
+            a[k] = v
+    return a
+
+
+def _load_config(ctx: click.Context,
+                 param: click.Parameter,
+                 path: 'PathLike') -> None:
+    """
+    Fetch parameters values from configuration file and sets them as defaults.
+    """
+    logger.info(f"Load configuration matching {path}")
+    if path:
+        try:
+            conf = yaml.safe_load(path)
+            # Update the default_map.
+            if ctx.default_map is None:
+                ctx.default_map = {}
+            ctx.default_map = _recursive_update(ctx.default_map, conf)
+        except FileNotFoundError:
+            logger.critical(f"No configuration file {path} found.")
 
 
 def _validate_manifests(ctx, param, value):
@@ -66,7 +99,7 @@ def message(msg, **styles):
         click.secho(msg, **styles)
 
 
-def to_ptl_device(device: str) -> Tuple[str, Optional[List[int]]]:
+def to_ptl_device(device: str) -> tuple[str, Optional[list[int]]]:
     if device.strip() == 'auto':
         return 'auto', 'auto'
     devices = device.split(',')

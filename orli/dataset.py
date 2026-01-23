@@ -20,16 +20,14 @@ import gc
 import torch
 import ctypes
 import torch.nn.functional as F
-import lightning.pytorch as L
 
 import numpy as np
 import pyarrow as pa
 
-from functools import partial
 from torchvision.transforms import v2
 from typing import TYPE_CHECKING, Union, Sequence
 
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
 from PIL import Image
 
@@ -38,7 +36,7 @@ from torch.utils.data import default_collate
 if TYPE_CHECKING:
     from os import PathLike
 
-__all__ = ['LineSegmentationDataModule']
+__all__ = ['BaselineSegmentationDataset']
 
 import logging
 
@@ -47,11 +45,12 @@ logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = 20000 ** 2
 
 
-def get_default_transforms(dtype=torch.float32):
-    return v2.Compose([v2.Resize((1920, 1440)),
+def get_default_transforms(image_size, dtype=torch.float32):
+    return v2.Compose([v2.Resize(image_size),
                        v2.ToImage(),
                        v2.ToDtype(dtype, scale=True),
                        v2.Normalize(mean=[0.4850, 0.4560, 0.4060], std=[0.2290, 0.2240, 0.2250])])
+
 
 def collate_curves(batch,
                    max_lines_in_page: int):
@@ -74,65 +73,6 @@ def _validation_worker_init_fn(worker_id):
         at info level about the seed being changed. """
     from lightning.pytorch import seed_everything
     seed_everything(42)
-
-
-class LineSegmentationDataModule(L.LightningDataModule):
-    def __init__(self,
-                 training_data: Union[str, 'PathLike'],
-                 evaluation_data: Union[str, 'PathLike'],
-                 augmentation: bool = False,
-                 batch_size: int = 1,
-                 num_workers: int = 8):
-        super().__init__()
-
-        self.bos_token_id = 1
-        self.eos_token_id = 2
-        self.line_token_id = 3
-
-        self.save_hyperparameters()
-
-    def setup(self, stage: str):
-        """
-        Actually builds the datasets.
-        """
-        self.train_set = BaselineSegmentationDataset(self.hparams.training_data,
-                                                     im_transforms=get_default_transforms(),
-                                                     augmentation=self.hparams.augmentation,
-                                                     bos_token_id=self.bos_token_id,
-                                                     eos_token_id=self.eos_token_id,
-                                                     line_token_id=self.line_token_id)
-
-        self.val_set = BaselineSegmentationDataset(self.hparams.evaluation_data,
-                                                   im_transforms=get_default_transforms(),
-                                                   augmentation=False,
-                                                   bos_token_id=self.bos_token_id,
-                                                   eos_token_id=self.eos_token_id,
-                                                   line_token_id=self.line_token_id)
-
-        max_lines_in_page = max(self.train_set.max_lines_in_page, self.val_set.max_lines_in_page)
-        logger.info(f'Max number of lines in page: {max_lines_in_page} (limit: {self.train_set.max_lines_per_page})')
-
-        self.collator = partial(collate_curves,
-                                max_lines_in_page=min(max(self.train_set.max_lines_in_page,
-                                                          self.val_set.max_lines_in_page),
-                                                      self.train_set.max_lines_per_page))
-
-    def train_dataloader(self):
-        return DataLoader(self.train_set,
-                          batch_size=self.hparams.batch_size,
-                          num_workers=self.hparams.num_workers,
-                          pin_memory=True,
-                          shuffle=True,
-                          collate_fn=self.collator)
-
-    def val_dataloader(self):
-        return DataLoader(self.val_set,
-                          shuffle=False,
-                          batch_size=self.hparams.batch_size,
-                          num_workers=self.hparams.num_workers,
-                          pin_memory=True,
-                          worker_init_fn=_validation_worker_init_fn,
-                          collate_fn=self.collator)
 
 
 class BaselineSegmentationDataset(Dataset):

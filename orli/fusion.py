@@ -247,328 +247,44 @@ class CurveRegressionHead(nn.Module):
                  embed_dim: int = 576,
                  num_cls: int = 4,
                  num_layers: int = 3,
-                 num_iterations: int = 4):
+                 num_iterations: int = 4,
+                 num_anchors: int = 5):
         super().__init__()
+        self.num_anchors = num_anchors
         reg_proj = nn.Sequential()
 
         if num_layers > 1:
             for n in range(num_layers-1):
                 reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
                 reg_proj.append(nn.SiLU())
-        reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, 8))
-        cls_proj = nn.Linear(embed_dim, num_cls)
+        reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, num_anchors * 8))
+        cls_proj = nn.Linear(embed_dim, num_anchors * num_cls)
         self.reg_projs = _get_clones(reg_proj, num_iterations)
         self.cls_projs = _get_clones(cls_proj, num_iterations)
-        self.register_buffer('curve_anchor', torch.tensor([3.6980e-01, 1.5557e+09, 4.5427e-01, 1.5557e+09, 5.3895e-01, 1.5557e+09, 6.2346e-01, 1.5557e+09]))
+        self.curve_anchors = nn.Parameter(torch.empty(num_anchors, 8))
+        # initialize anchors. a better initialization would be to use k-means on the dataset
+        nn.init.uniform_(self.curve_anchors, 0, 1)
 
     def forward(self, xs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         """
         Args:
             xs: A list containing `num_iterations` tensors of shape
-                ``[* x d_e]`` where ``d_e`` is the decoder embedding dim.
+                ``[b, s, d_e]`` where ``d_e`` is the decoder embedding dim.
 
         Returns:
-            A dictionary containing an output tensor with shape ``[num_iterations x * x 8]``
+            A dictionary containing an output tensor with shape ``[num_iterations, b, s, num_anchors, 8]``
             under the key `curves` and the class logits in `tokens` with shape
-            ``[num_iterations x * x * num_cls]``.
+            ``[num_iterations, b, s, num_anchors, num_cls]``.
         """
-        _curves: list[torch.Tensor] = [self.curve_anchor]
+        batch_size, seq_len, _ = xs[0].shape
+        # expand anchors to batch and sequence dimensions
+        _curves: list[torch.Tensor] = [self.curve_anchors.unsqueeze(0).unsqueeze(0).expand(batch_size, seq_len, -1, -1)]
         _logits: list[torch.Tensor] = []
         for cls_proj, reg_proj, layer in zip(self.cls_projs, self.reg_projs, xs):
             curves = _curves[-1].detach()
-            _logits.append(cls_proj(layer))
-            _curves.append(curves + reg_proj(layer))
+            offsets = reg_proj(layer).view(batch_size, seq_len, self.num_anchors, 8)
+            _curves.append(curves + offsets)
+            _logits.append(cls_proj(layer).view(batch_size, seq_len, self.num_anchors, -1))
 
         return {'curves': torch.stack(_curves[1:]),
                 'tokens': torch.stack(_logits)}
-
-
-class OrliModel(nn.Module):
-    """
-    The transformer segmentation fusion model.
-
-    Args:
-        encoder: A timm image encoder model
-        adapter:
-        decoder: Curve decoder model
-    """
-    eos_id: int = 2
-
-    def __init__(self,
-                 encoder: nn.Module,
-                 decoder: nn.Module,
-                 encoder_embed_dims: list[int],
-                 decoder_embed_dim: int,
-                 adapter_num_layers: int = 1,
-                 adapter_num_heads: int = 8):
-        super().__init__()
-        self.encoder = encoder
-        self.decoder = decoder
-
-        self.adapter = OrliAdapter(adapter_num_layers,
-                                   adapter_num_heads,
-                                   encoder_embed_dims,
-                                   decoder_embed_dim)
-
-        self.curve_reg = CurveRegressionHead(embed_dim=decoder_embed_dim,
-                                             num_iterations=len(decoder.output_hidden_states) + 1)
-
-        self.ready_for_generation = False
-
-    @classmethod
-    def from_safetensors(cls, filename: Union[str, 'PathLike']) -> 'OrliModel':
-        """
-        Loads model weights from a safetensors-based kraken serialization.
-        """
-        import timm
-        from safetensors import safe_open
-        from safetensors.torch import load_model
-
-        with safe_open(filename, framework='pt') as f:
-            metadata = f.metadata()
-            if metadata['model_type'] != 'kraken_orli':
-                raise ValueError(f'{filename} is not a orli model. Got type {metadata["model_type"]}, expected: orli.')
-            config = json.loads(metadata['config'])
-            encoder_config = {k[8:]: v for k, v in config.items() if k.startswith('encoder_')}
-
-        encoder_model = timm.create_model(encoder_config['name'],
-                                          pretrained=False,
-                                          features_only=True,
-                                          out_indices=encoder_config['idxs'])
-
-        encoder_sizes = [(int(encoder_config['input_size'][0]/encoder_model.feature_info.reduction(idx)),
-                          int(encoder_config['input_size'][1]/encoder_model.feature_info.reduction(idx)),
-                          encoder_model.feature_info.channels(idx)) for idx in encoder_config['idxs']]
-
-        decoder_model = baseline_decoder(encoder_sizes=[x[:2] for x in encoder_sizes])
-
-        model = OrliModel(encoder=encoder_model,
-                          decoder=decoder_model,
-                          encoder_embed_dims=[x[2] for x in encoder_sizes],
-                          decoder_embed_dim=decoder_model.tok_embeddings.out_features)
-
-        # load shared tensors
-        load_model(model, 'orli_base.safetensors')
-        return model
-
-    def setup_caches(self,
-                     batch_size: int,
-                     dtype: torch.dtype,
-                     *,
-                     encoder_max_seq_len: int = None,
-                     decoder_max_seq_len: int = None):
-        """
-        Sets up key-value attention caches for inference for ``self.decoder``.
-        For each layer in ``self.decoder.layers``:
-        - :class:`party.modules.TransformerSelfAttentionLayer` will use ``decoder_max_seq_len``.
-        - :class:`party.modules.TransformerCrossAttentionLayer` will use ``encoder_max_seq_len``.
-        - :class:`party.modules.fusion.FusionLayer` will use both ``decoder_max_seq_len`` and ``encoder_max_seq_len``.
-
-        Args:
-            batch_size (int): batch size for the caches.
-            dtype (torch.dtype): dtype for the caches.
-            encoder_max_seq_len (int): maximum encoder cache sequence length.
-            decoder_max_seq_len (int): maximum decoder cache sequence length.
-        """
-        self.decoder.setup_caches(batch_size,
-                                  dtype,
-                                  encoder_max_seq_len=encoder_max_seq_len,
-                                  decoder_max_seq_len=decoder_max_seq_len)
-
-    def caches_are_setup(self) -> bool:
-        """
-        Check if the key value caches are setup. This means ``setup_caches`` has been called, and
-        the relevant attention modules in the model have created their ``KVCache``.
-        """
-        return self.decoder.caches_are_setup()
-
-    def caches_are_enabled(self) -> bool:
-        """
-        Checks if the key value caches are enabled. Once KV-caches have been setup, the relevant
-        attention modules will be "enabled" and all forward passes will update the caches. This behaviour
-        can be disabled without altering the state of the KV-caches by "disabling" the KV-caches
-        using :func:`~torchtune.modules.common_utils.disable_kv_cache`, upon which ``caches_are_enabled`` would return False.
-        """
-        return self.decoder.caches_are_enabled()
-
-    def reset_caches(self):
-        """
-        Resets KV-cache buffers on relevant attention modules to zero, and reset cache positions to zero,
-        without deleting or reallocating cache tensors.
-        """
-        self.decoder.reset_caches()
-
-    def forward(self,
-                tokens: torch.Tensor,
-                *,
-                encoder_input: Optional[torch.Tensor] = None,
-                encoder_hidden_states: Optional[torch.Tensor] = None,
-                encoder_curves: Optional[torch.Tensor] = None,
-                encoder_mask: Optional[torch.Tensor] = None,
-                mask: Optional[torch.Tensor] = None,
-                input_pos: Optional[torch.Tensor] = None) -> Union[torch.Tensor, List[torch.Tensor]]:
-        """
-        Args:
-            tokens (torch.Tensor): input tensor with shape ``[b x s]``
-            encoder_input: Optional input for the encoder.
-            encoder_hidden_states: Optional encoder embeddings with curve
-                                   embeddings already added.
-            encoder_curves: Optional curves to be embedded and added to encoder
-                            embeddings.
-            input_pos: Optional tensor which contains the position ids of each
-                       token. During training, this is used to indicate the
-                       positions of each token relative to its sample when
-                       packed, shape ``[b x s]``.  During inference, this
-                       indicates the position of the current token.  If none,
-                       assume the index of the token is its position id.
-                       Default is None.
-
-        Note: At the very first step of inference, when the model is provided with a prompt,
-        ``input_pos`` would contain the positions of all of the tokens in the prompt
-        (eg: ``torch.arange(prompt_length)``). This is because we will need to compute the
-        KV values for each position.
-
-        Returns:
-            Tensor: output tensor with shape ``[b x s x v]`` or a list of layer \
-                output tensors defined by ``output_hidden_states`` with the \
-                final output tensor appended to the list.
-
-        Notation used for tensor shapes:
-            - b: batch size
-            - s: token sequence length
-            - s_e: encoder sequence length
-            - v: vocab size
-            - d: token embed dim
-            - d_e: encoder embed dim
-            - m_s: max seq len
-        """
-        # During decoding, encoder_input will only be provided
-        # for new inputs. Previous encoder outputs are cached
-        # in the decoder cache.
-        if encoder_input is not None:
-            encoder_hidden_states = self.forward_encoder_embeddings(encoder_input)
-
-        output = self.decoder(tokens=tokens,
-                              mask=mask,
-                              encoder_input=encoder_hidden_states,
-                              encoder_mask=encoder_mask,
-                              input_pos=input_pos)
-        return self.curve_reg(output)
-
-    def forward_encoder_embeddings(self, encoder_input):
-        """
-        Computes the encoder embeddings *without* adding the curve positional
-        embeddings.
-        """
-        encoder_hidden_states = self.encoder(encoder_input)
-        return self.adapter(encoder_hidden_states)
-
-    @torch.inference_mode()
-    def prepare_for_generation(self,
-                               bos_id: torch.Tensor = torch.Tensor([1]).long(),
-                               batch_size: int = 1,
-                               max_encoder_seq_len: int = 56700,
-                               max_generated_tokens: int = 768,
-                               device: torch.device = torch.device('cpu')):
-
-        if self.ready_for_generation:
-            raise ValueError('Model has already been prepared for generation!')
-
-        self._batch_size = batch_size
-        self._max_generated_tokens = max_generated_tokens
-        self._max_encoder_seq_len = max_encoder_seq_len
-
-        # generate a regular causal mask
-        self._masks = torch.tril(torch.ones(max_generated_tokens,
-                                            max_generated_tokens,
-                                            dtype=torch.bool,
-                                            device=device)).unsqueeze(0)
-        self._input_pos = torch.arange(0, max_generated_tokens, device=device).unsqueeze(0)
-
-        # set up caches
-        self.setup_caches(batch_size=batch_size,
-                          encoder_max_seq_len=max_encoder_seq_len,
-                          decoder_max_seq_len=max_generated_tokens,
-                          dtype=next(self.encoder.parameters()).dtype)
-
-        # create batch size number of BOS tokens
-        self._prompt = F.one_hot(bos_id, num_classes=12).to(device=device, dtype=torch.float).unsqueeze(0).repeat(batch_size, 1, 1)
-        self.ready_for_generation = True
-
-    @torch.inference_mode()
-    def predict(self,
-                encoder_input: torch.FloatTensor) -> Generator[torch.Tensor, None, None]:
-        """
-        Predicts Bézier curves and line classes.
-
-        Args:
-            encoder_input: Image input for the encoder with shape ``n x c x h x w``
-
-        Returns:
-            A float tensor of with shape ``n x s x 8`` where ``n`` is the batch
-            size, ``s`` is the maximum number of curves detected, and the last
-            dimension is an 8-tuple defining the control points of a cubic
-            Bézier curve. No-output is indicated by zeroed output control
-            points. If s < max_generated_tokens the last entry across all batch
-            items will be a no-output.
-        """
-        logger.info('Computing encoder embeddings')
-
-        encoder_hidden_states = self.forward_encoder_embeddings(encoder_input)
-
-        eos_token = torch.tensor(self.eos_id, device=encoder_hidden_states.device, dtype=torch.long)
-
-        # Mask is shape (batch_size, max_seq_len, image_embedding_len)
-        encoder_mask = torch.ones((encoder_hidden_states.size(0),
-                                   1,
-                                   encoder_hidden_states.size(1)),
-                                  dtype=torch.bool,
-                                  device=encoder_input.device)
-        # prefill step
-        curr_masks = self._masks[:, :1]
-        logits = self.forward(tokens=self._prompt,
-                              encoder_hidden_states=encoder_hidden_states,
-                              encoder_mask=encoder_mask,
-                              mask=curr_masks,
-                              input_pos=self._input_pos[:, :1].squeeze())
-        tokens = torch.argmax(logits['tokens'][-1, ...], dim=-1)
-        curves = logits['curves'][-1, ...]
-        generated_curves = [curves[:, -1]]
-
-        curr_pos = 1
-
-        # keeps track of EOS tokens emitted by each sequence in a batch
-        eos_token_reached = torch.zeros(self._batch_size, dtype=torch.bool, device=encoder_input.device)
-        eos_token_reached |= tokens[:, -1] == eos_token
-
-        # mask used for setting all values from EOS token to pad_id in output sequences.
-        eos_token_mask = torch.ones(self._batch_size, 0, dtype=torch.int32, device=curves.device)
-
-        for _ in range(self._max_generated_tokens - 1):
-            # update eos_token_mask if an EOS token was emitted in a previous step
-            eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
-
-            curr_input_pos = self._input_pos[:, curr_pos]
-            curr_masks = self._masks[:, curr_pos, None, :]
-
-            # no need for encoder embeddings anymore as they're in the cache now
-            logits = self.forward(tokens=torch.cat([F.one_hot(tokens, num_classes=4).to(device=encoder_hidden_states.device),
-                                                    curves], dim=-1),
-                                  mask=curr_masks,
-                                  input_pos=curr_input_pos)
-            tokens = torch.argmax(logits['tokens'][-1, ...], dim=-1)
-            curves = logits['curves'][-1, ...]
-            generated_curves.append(curves[:, -1])
-
-            curr_pos += 1
-
-            eos_token_reached |= tokens[:, -1] == eos_token
-
-            logger.info(f'Generated tokens: {tokens} Generated curves: {curves}')
-
-            if eos_token_reached.all():
-                break
-
-        eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
-        eos_curve_mask = eos_token_mask.expand(8, -1, -1).permute(1, 2, 0)
-        return torch.stack(generated_curves, dim=1) * eos_curve_mask
