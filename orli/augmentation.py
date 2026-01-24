@@ -30,11 +30,16 @@ class DefaultAugmenter(nn.Module):
         super().__init__()
         self.transforms = nn.Sequential(
             aug.RandomErasing(p=0.2, scale=(0.02, 0.02)),
-            aug.ColorJiggle(p=0.5, brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            aug.ColorJitter(p=0.5, brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
             aug.RandomGrayscale(p=0.2),
-            aug.RandomMotionBlur(p=0.1, kernel_size=3, angle=45.0, direction=0.0),
-            aug.RandomMedianBlur(p=0.05, kernel_size=3),
-            aug.RandomGaussianBlur(p=0.05, kernel_size=(3, 3), sigma=(0.1, 2.0)),
+            aug.RandomChoice(
+                [
+                    aug.RandomMotionBlur(p=0.2, kernel_size=3, angle=45.0, direction=0.0),
+                    aug.RandomMedianBlur(p=0.1, kernel_size=3),
+                    aug.RandomGaussianBlur(p=0.1, kernel_size=(3, 3), sigma=(0.1, 2.0)),
+                ],
+                p=0.2,
+            ),
         )
 
     @torch.no_grad()
