@@ -48,7 +48,8 @@ Image.MAX_IMAGE_PIXELS = 20000 ** 2
 def get_default_transforms(image_size, dtype=torch.float32):
     return v2.Compose([v2.Resize(image_size),
                        v2.ToImage(),
-                       v2.ToDtype(dtype, scale=True)])
+                       v2.ToDtype(dtype, scale=True),
+                       v2.Normalize(mean=[0.4850, 0.4560, 0.4060], std=[0.2290, 0.2240, 0.2250])])
 
 
 def collate_curves(batch,
@@ -82,18 +83,21 @@ class BaselineSegmentationDataset(Dataset):
         files: Paths to binary dataset files.
         im_transforms: Function taking an PIL.Image and returning a tensor
                        suitable for forward passes.
+        augmentation: Enables augmentation.
         max_pos_embeddings: Maximum number of lines to return from dataset.
                             Pages with more lines will be skipped.
     """
     def __init__(self,
                  files: Sequence[Union[str, 'PathLike']],
                  im_transforms=None,
+                 augmentation: bool = False,
                  max_lines_per_page: int = 768,
                  bos_token_id: int = 1,
                  eos_token_id: int = 2,
                  line_token_id: int = 3) -> None:
         self.files = files
         self.transforms = im_transforms
+        self.aug = None
         self.arrow_table = None
         self.max_lines_in_page = 0
         self.max_lines_per_page = max_lines_per_page
@@ -116,6 +120,10 @@ class BaselineSegmentationDataset(Dataset):
                     self.arrow_table = ds_table
                 else:
                     self.arrow_table = pa.concat_tables([self.arrow_table, ds_table])
+
+        if augmentation:
+            from orli.augmentation import DefaultAugmenter
+            self.aug = DefaultAugmenter()
 
     def __getitem__(self, index: int):
         # just sample from a random page
@@ -147,6 +155,11 @@ class BaselineSegmentationDataset(Dataset):
         line_cls[0] = self.bos_token_id
         line_cls[-1] = self.eos_token_id
         line_cls = F.one_hot(line_cls, num_classes=4).float()
+
+        if self.aug:
+            im = im.permute((1, 2, 0)).numpy()
+            o = self.aug(image=im)
+            im = torch.from_numpy(o['image'].transpose(2, 0, 1))
 
         return {'image': im,
                 'tokens': line_cls,

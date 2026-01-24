@@ -40,7 +40,6 @@ class OrliModel(nn.Module, BaseModel):
     The transformer segmentation fusion model.
 
     Args:
-        image_size: tuple[int, int]
     """
     bos_id: int = 2
     eos_id: int = 2

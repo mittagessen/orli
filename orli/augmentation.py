@@ -15,33 +15,67 @@
 """
 Utility functions for data loading and training of VGSL networks.
 """
+from typing import Any, Dict, List, Tuple, Union
+
 import torch
 import logging
 
-import torch.nn as nn
-
-from kornia import augmentation as aug
+from torchvision.transforms import v2
 
 logger = logging.getLogger(__name__)
 
 
-class DefaultAugmenter(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.transforms = nn.Sequential(
-            aug.RandomErasing(p=0.2, scale=(0.02, 0.02)),
-            aug.ColorJitter(p=0.5, brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-            aug.RandomGrayscale(p=0.2),
-            aug.RandomChoice(
-                [
-                    aug.RandomMotionBlur(p=0.2, kernel_size=3, angle=45.0, direction=0.0),
-                    aug.RandomMedianBlur(p=0.1, kernel_size=3),
-                    aug.RandomGaussianBlur(p=0.1, kernel_size=(3, 3), sigma=(0.1, 2.0)),
-                ],
-                p=0.2,
-            ),
-        )
+class BoundRandomResize(v2.RandomShortestSize):
+    """
+    Randomly proportionally resizes an input image between upper and lower
+    image dimension bounds.
 
-    @torch.no_grad()
-    def __call__(self, image: torch.Tensor) -> torch.Tensor:
-        return self.transforms(image)
+    Only accepts tuple-d bounds.
+    """
+    def __init__(self,
+                 min_size: Union[List[int], Tuple[int]],
+                 max_size: Union[List[int], Tuple[int]],
+                 *args,
+                 **kwargs):
+        super().__init__(*args, **kwargs, min_size=min_size)
+        self.min_size = list(min_size)
+        self.max_size = list(max_size)
+
+    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+        orig_height, orig_width = v2._utils.query_size(flat_inputs)
+
+        # recompute lower and upper ratios so resized image falls into bounds
+        min_r = max(self.min_size[0]/orig_height, self.min_size[1]/orig_width)
+        max_r = min(self.max_size[0]/orig_height, self.max_size[1]/orig_width)
+        
+        # do not randomly scale if dimensions would fall outside bounds
+        if max_r < min_r:
+            r = max_r
+        else:
+            r = torch.FloatTensor(1).uniform_(min_r, max_r).item()
+        new_width = int(orig_width * r)
+        new_height = int(orig_height * r)
+
+        return dict(size=(new_height, new_width))
+
+
+class DefaultAugmenter:
+    def __init__(self):
+        import cv2
+        cv2.setNumThreads(0)
+        from albumentations import (Blur, Compose, MedianBlur, MotionBlur,
+                                    OneOf, PixelDropout, ToFloat, ColorJitter)
+
+        self._transforms = Compose([
+                                    ToFloat(),
+                                    PixelDropout(p=0.2),
+                                    ColorJitter(p=0.5),
+                                    OneOf([
+                                        MotionBlur(p=0.2),
+                                        MedianBlur(blur_limit=3, p=0.1),
+                                        Blur(blur_limit=3, p=0.1),
+                                    ], p=0.2)
+                                   ], p=0.5)
+
+    def __call__(self, image):
+        return self._transforms(image=image)
