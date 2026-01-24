@@ -142,9 +142,9 @@ def train(ctx, **kwargs):
 
     if params.get('augment'):
         try:
-            import albumentations  # NOQA
+            import kornia
         except ImportError:
-            raise click.BadOptionUsage('augment', 'augmentation needs the `albumentations` package installed.')
+            raise click.BadOptionUsage('augment', 'augmentation needs the `kornia` package installed.')
 
     if params.get('pl_logger') == 'tensorboard':
         try:

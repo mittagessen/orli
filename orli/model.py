@@ -118,7 +118,6 @@ class OrliSegmentationDataModule(L.LightningDataModule):
         if data_config.training_data and data_config.evaluation_data:
             self.train_set = BaselineSegmentationDataset(data_config.training_data,
                                                          im_transforms=im_transforms,
-                                                         augmentation=data_config.augment,
                                                          bos_token_id=self.bos_token_id,
                                                          eos_token_id=self.eos_token_id,
                                                          line_token_id=self.line_token_id)
@@ -153,6 +152,11 @@ class OrliSegmentationDataModule(L.LightningDataModule):
 
         self.collator = partial(collate_curves,
                                 max_lines_in_page=min(max_lines_in_page, line_limit))
+
+    def setup(self, stage: str = None):
+        if stage == 'fit' or stage is None:
+            self.hparams.data_config.line_class_mapping = dict(self.hparams.data_config.line_class_mapping)
+            self.hparams.data_config.region_class_mapping = dict(self.hparams.data_config.region_class_mapping)
 
     def train_dataloader(self):
         return DataLoader(self.train_set,
@@ -239,6 +243,11 @@ class OrliSegmentationModel(L.LightningModule):
         logger.info('Creating segmentation model')
 
         if stage in [None, 'fit']:
+            # create augmentations here as they run on GPU
+            if self.trainer.datamodule.hparams.data_config.augment:
+                from orli.augmentation import DefaultAugmenter
+                self.augmenter = DefaultAugmenter()
+
             if self.net is None:
                 self.net = create_model('OrliModel',
                                         image_size=self.trainer.datamodule.hparams.data_config.image_size)
@@ -248,6 +257,11 @@ class OrliSegmentationModel(L.LightningModule):
                     param.requires_grad = False
                 for param in self.net.adapter.parameters():
                     param.requires_grad = False
+
+    def on_after_batch_transfer(self, batch, dataloader_idx):
+        if self.training and self.trainer.datamodule.hparams.data_config.augment:
+            batch['image'] = self.augmenter(batch['image'])
+        return batch
 
     def on_save_checkpoint(self, checkpoint):
         """
