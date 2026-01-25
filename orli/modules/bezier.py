@@ -31,9 +31,8 @@ def sample_bezier_curve(curves: torch.Tensor, num_samples: int = 20) -> torch.Te
     Returns:
         A tensor of shape (..., num_samples, 2) containing the sampled points.
     """
-    batch_dims = curves.shape[:-1]
     # Reshape curves to (..., 4, 2)
-    p = curves.view(*batch_dims, 4, 2)
+    p = curves.view(-1, 4, 2)
     p0, p1, p2, p3 = p[..., 0, :], p[..., 1, :], p[..., 2, :], p[..., 3, :]
 
     # Generate t values
