@@ -48,8 +48,7 @@ Image.MAX_IMAGE_PIXELS = 20000 ** 2
 def get_default_transforms(image_size, dtype=torch.float32):
     return v2.Compose([v2.Resize(image_size),
                        v2.ToImage(),
-                       v2.ToDtype(dtype, scale=True),
-                       v2.Normalize(mean=[0.4850, 0.4560, 0.4060], std=[0.2290, 0.2240, 0.2250])])
+                       v2.ToDtype(dtype, scale=True)])
 
 
 def collate_curves(batch,

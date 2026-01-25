@@ -29,7 +29,7 @@ class OrliSegmentationTrainingDataConfig(SegmentationTrainingDataConfig):
     """
     def __init__(self, **kwargs):
         self.val_batch_size = kwargs.pop('val_batch_size', None)
-        self.image_size = kwargs.pop('image_size', (1024, 768))
+        self.image_size = kwargs.pop('image_size', (1280, 960))
 
         kwargs['line_class_mapping'] = {'DefaultLine': 1}
         kwargs['region_class_mapping'] = {} # no support for region detection
