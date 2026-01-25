@@ -20,43 +20,28 @@ import torch
 
 def sample_bezier_curve(curves: torch.Tensor, num_samples: int = 20) -> torch.Tensor:
     """
-    Samples points from a batch of cubic Bézier curves.
-
+    Evaluates cubic Bezier curves at a specific number of steps.
+    
     Args:
-        curves (torch.Tensor): A tensor of shape (..., 8) containing the
-                               control points of the Bézier curves in the
-                               format (x0, y0, x1, y1, x2, y2, x3, y3).
-        num_samples (int): The number of points to sample along each curve.
-
+        control_points: A tensor of shape [..., 4, 2] containing the curve
+        control points.
+        num_samples: The number of points to sample along the curve.
+        
     Returns:
-        A tensor of shape (..., num_samples, 2) containing the sampled points.
+        A tensor of shape [..., num_samples, 2] containing the sampled points.
     """
-    batch_dims = curves.shape[:-1]
-    # Reshape curves to (..., 4, 2)
-    p = curves.view(*batch_dims, 4, 2)
-    p0, p1, p2, p3 = p[..., 0, :], p[..., 1, :], p[..., 2, :], p[..., 3, :]
-
-    # Generate t values
-    t = torch.linspace(0.0, 1.0, num_samples, device=curves.device)
-    # expand t for batch operations
-    # 1. unsqueeze to (1, num_samples)
-    # 2. unsqueeze to (1, num_samples, 1) to allow broadcasting with (..., 1, 2)
-    t = t.view(1, -1, 1)
-
-    # expand dims of control points for broadcasting
-    p0 = p0.unsqueeze(-2)
-    p1 = p1.unsqueeze(-2)
-    p2 = p2.unsqueeze(-2)
-    p3 = p3.unsqueeze(-2)
-
-    # Calculate points
-    # (1-t)
+    t = torch.linspace(0, 1, num_samples, dtype=curves.dtype, device=curves.device)
+    
     one_minus_t = 1 - t
-    # B(t) = P0*(1-t)^3 + P1*3*t*(1-t)^2 + P2*3*t^2*(1-t) + P3*t^3
-    points = (
-        p0 * (one_minus_t**3) +
-        p1 * (3 * t * one_minus_t**2) +
-        p2 * (3 * t**2 * one_minus_t) +
-        p3 * (t**3)
-    )
-    return points
+    
+    b0 = one_minus_t ** 3
+    b1 = 3 * (one_minus_t ** 2) * t
+    b2 = 3 * one_minus_t * (t ** 2)
+    b3 = t ** 3
+    
+    coeffs = torch.stack([b0, b1, b2, b3], dim=-1)
+
+    sampled_points = torch.einsum('... i d, s i -> ... s d', curves, coeffs)
+    
+    return sampled_points
+
