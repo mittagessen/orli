@@ -99,7 +99,7 @@ def model_step(model,
 
         _loss = 2 * cls_loss + 5 * curve_loss
         losses = _loss if not losses else losses + _loss
-    return losses / num_lines
+    return losses / (logits['curves'].shape[0] * num_lines)
 
 
 class OrliSegmentationDataModule(L.LightningDataModule):
