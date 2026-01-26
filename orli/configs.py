@@ -1,5 +1,7 @@
 from kraken.configs import TrainingConfig, SegmentationTrainingDataConfig
 
+from importlib.resources import files
+
 
 class OrliSegmentationTrainingConfig(TrainingConfig):
     """
@@ -9,6 +11,7 @@ class OrliSegmentationTrainingConfig(TrainingConfig):
     """
     def __init__(self, **kwargs):
         self.freeze_encoder = kwargs.pop('freeze_encoder', False)
+        self.anchors_path = kwargs.pop('anchors_path', files('orli.assets').joinpath('anchors.pt'))
 
         kwargs.setdefault('quit', 'fixed')
         kwargs.setdefault('epochs', 16)
@@ -32,7 +35,7 @@ class OrliSegmentationTrainingDataConfig(SegmentationTrainingDataConfig):
         self.image_size = kwargs.pop('image_size', (1280, 960))
 
         kwargs['line_class_mapping'] = {'DefaultLine': 1}
-        kwargs['region_class_mapping'] = {} # no support for region detection
+        kwargs['region_class_mapping'] = {}  # no support for region detection
         kwargs.setdefault('batch_size', 8)
         kwargs.setdefault('format_type', 'binary')
         super().__init__(**kwargs)

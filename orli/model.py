@@ -246,7 +246,8 @@ class OrliSegmentationModel(L.LightningModule):
         if stage in [None, 'fit']:
             if self.net is None:
                 self.net = create_model('OrliModel',
-                                        image_size=self.trainer.datamodule.hparams.data_config.image_size)
+                                        image_size=self.trainer.datamodule.hparams.data_config.image_size,
+                                        anchors_path=self.hparams.config.anchors_path)
 
             if self.hparams.config.freeze_encoder:
                 for param in self.net.encoder.parameters():
@@ -271,7 +272,8 @@ class OrliSegmentationModel(L.LightningModule):
 
         data_config = checkpoint['datamodule_hyper_parameters']['data_config']
         self.net = create_model('OrliModel',
-                                image_size=data_config.image_size)
+                                image_size=data_config.image_size,
+                                anchors_path=checkpoint['_module_config'].anchors_path)
 
     @classmethod
     def load_from_repo(cls,

@@ -16,11 +16,10 @@
 """Llama vision fusion model"""
 
 import logging
-from typing import Generator, Optional, Union, List, TYPE_CHECKING
+from typing import Optional, Union, TYPE_CHECKING
 
 import json
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
@@ -35,7 +34,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ['baseline_decoder', 'OrliModel']
+__all__ = ['baseline_decoder', 'CurveRegressionHead']
 
 
 def baseline_decoder(vocab_size: int = 12,
@@ -244,26 +243,24 @@ class CurveRegressionHead(nn.Module):
     """
 
     def __init__(self,
+                 anchors: Union[str, 'PathLike'],
                  embed_dim: int = 576,
                  num_cls: int = 4,
                  num_layers: int = 3,
-                 num_iterations: int = 4,
-                 num_anchors: int = 5):
+                 num_iterations: int = 4):
         super().__init__()
-        self.num_anchors = num_anchors
         reg_proj = nn.Sequential()
+        self.register_buffer('curve_anchors', torch.load(anchors, map_location='cpu'))
+        self.num_anchors = self.curve_anchors.shape[0]
 
         if num_layers > 1:
             for n in range(num_layers-1):
                 reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
                 reg_proj.append(nn.SiLU())
-        reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, num_anchors * 8))
-        cls_proj = nn.Linear(embed_dim, num_anchors * num_cls)
+        reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, self.num_anchors * 8))
+        cls_proj = nn.Linear(embed_dim, self.num_anchors * num_cls)
         self.reg_projs = _get_clones(reg_proj, num_iterations)
         self.cls_projs = _get_clones(cls_proj, num_iterations)
-        self.curve_anchors = nn.Parameter(torch.empty(num_anchors, 8))
-        # initialize anchors. a better initialization would be to use k-means on the dataset
-        nn.init.uniform_(self.curve_anchors, 0, 1)
 
     def forward(self, xs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         """

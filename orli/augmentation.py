@@ -15,12 +15,7 @@
 """
 Utility functions for data loading and training of VGSL networks.
 """
-from typing import Any, Dict, List, Tuple, Union
-
-import torch
 import logging
-
-from torchvision.transforms import v2
 
 logger = logging.getLogger(__name__)
 

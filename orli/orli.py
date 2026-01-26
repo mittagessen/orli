@@ -57,13 +57,17 @@ class OrliModel(nn.Module, BaseModel):
         if (image_size := kwargs.get('image_size', None)) is None:
             raise ValueError('image_size argument is missing in args.')
 
+        anchors_path = kwargs.pop('anchors_path', None)
+        if not anchors_path:
+            raise ValueError('anchors_path argument is missing in args.')
+
         self.user_metadata: dict[str, Any] = {'accuracy': [],
                                               'metrics': []}
         self.user_metadata.update(kwargs)
 
         logger.info('Creating segmentation model')
 
-        encoder_model = timm.create_model('convnextv2_tiny',
+        encoder_model = timm.create_model('mobilenetv4_hybrid_medium.ix_e550_r384_in1k',
                                           pretrained=True,
                                           features_only=True,
                                           out_indices=encoder_idxs)
@@ -80,7 +84,8 @@ class OrliModel(nn.Module, BaseModel):
                               decoder_embed_dim=decoder_model.tok_embeddings.out_features)
 
         curve_reg = CurveRegressionHead(embed_dim=decoder_model.tok_embeddings.out_features,
-                                        num_iterations=len(decoder_model.output_hidden_states) + 1)
+                                        num_iterations=len(decoder_model.output_hidden_states) + 1,
+                                        anchors=anchors_path)
 
         self.nn = nn.ModuleDict({'encoder': encoder_model,
                                  'decoder': decoder_model,
