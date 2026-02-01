@@ -67,7 +67,7 @@ class OrliModel(nn.Module, BaseModel):
 
         logger.info('Creating segmentation model')
 
-        encoder_model = timm.create_model('mobilenetv4_hybrid_medium.ix_e550_r384_in1k',
+        encoder_model = timm.create_model('convnextv2_tiny',
                                           pretrained=True,
                                           features_only=True,
                                           out_indices=encoder_idxs)
@@ -76,12 +76,13 @@ class OrliModel(nn.Module, BaseModel):
                           int(image_size[1]/encoder_model.feature_info.reduction(idx)),
                           encoder_model.feature_info.channels(idx)) for idx in encoder_idxs]
 
-        decoder_model = baseline_decoder(encoder_sizes=[x[:2] for x in encoder_sizes])
-
         adapter = OrliAdapter(adapter_num_layers,
                               adapter_num_heads,
                               encoder_embed_dims=[x[2] for x in encoder_sizes],
-                              decoder_embed_dim=decoder_model.tok_embeddings.out_features)
+                              encoder_sizes=[x[:2] for x in encoder_sizes],
+                              decoder_embed_dim=576)
+
+        decoder_model = baseline_decoder(encoder_sizes=adapter.output_sizes)
 
         curve_reg = CurveRegressionHead(embed_dim=decoder_model.tok_embeddings.out_features,
                                         num_iterations=len(decoder_model.output_hidden_states) + 1,

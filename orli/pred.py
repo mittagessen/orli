@@ -23,13 +23,11 @@ import torch
 import logging
 import numpy as np
 
-from dataclasses import asdict
-
 from scipy.special import comb
 from shapely.geometry import LineString
 from kraken.containers import Segmentation, BaselineLine
 
-from typing import TYPE_CHECKING, Union, Tuple, Optional, Literal, Generator, List
+from typing import TYPE_CHECKING
 
 from orli.dataset import get_default_transforms
 
@@ -45,6 +43,7 @@ if TYPE_CHECKING:
 
 __all__ = ['segment']
 
+
 # magic lsq cubic bezier fit function from the internet.
 def Mtk(n, t, k):
     return t**k * (1-t)**(n-k) * comb(n, k)
@@ -54,7 +53,7 @@ def BezierCoeff(ts):
     return [[Mtk(3, t, k) for k in range(4)] for t in ts]
 
 
-def sample_curves(curves: torch.Tensor) -> List[List[Tuple[int, int]]]:
+def sample_curves(curves: torch.Tensor) -> list[list[tuple[int, int]]]:
     samples = np.linspace(0, 1, 20)
     coeff = np.array(BezierCoeff(samples))
     lines = []
@@ -76,8 +75,8 @@ def segment(model: 'OrliModel',
         im: Pillow image
         fabric: Fabric context manager to cast models and tensors.
 
-    Returns: 
-        A Segmentation object 
+    Returns:
+        A Segmentation object
     """
     m_dtype = next(model.parameters()).dtype
     m_device = next(model.parameters()).device
@@ -96,7 +95,7 @@ def segment(model: 'OrliModel',
         curves = model.predict(encoder_input=image_input).squeeze()
         # strip trailing no-op if it is there.
         if not curves[-1].any():
-           curves = curves[:-1]
+            curves = curves[:-1]
         curves *= curve_scale
     lines = sample_curves(curves)
 

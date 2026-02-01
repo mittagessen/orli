@@ -22,10 +22,9 @@ import lightning.pytorch as L
 from functools import partial
 from lightning.pytorch.callbacks import EarlyStopping
 from torch.optim import lr_scheduler
-from torchvision.ops import sigmoid_focal_loss
 from torchmetrics.aggregation import MeanMetric
 from torch.utils.data import DataLoader
-from typing import Optional, Union
+from typing import Optional, Union, TYPE_CHECKING
 
 from kraken.models import create_model
 from kraken.train.utils import configure_optimizer_and_lr_scheduler
@@ -36,6 +35,11 @@ from orli.dataset import (get_default_transforms, BaselineSegmentationDataset,
 from orli.configs import OrliSegmentationTrainingConfig, OrliSegmentationTrainingDataConfig
 
 logger = logging.getLogger(__name__)
+
+
+if TYPE_CHECKING:
+    from kraken.models import BaseModel
+    from os import PathLike
 
 
 @torch.compile()
@@ -84,10 +88,12 @@ def model_step(model,
         batch_target_tokens = target_tokens[valid_targets_mask]
 
         # create target for classification loss
-        target_for_cls = torch.zeros_like(pred_tokens, dtype=batch_target_tokens.dtype)
         item_indices = torch.arange(pred_tokens.shape[0])
-        target_for_cls[item_indices, best_anchor_idx] = batch_target_tokens
-        cls_loss = cls_criterion(pred_tokens, target_for_cls)
+        target_cls_idx = torch.zeros(pred_tokens.shape[0], pred_tokens.shape[1],
+                                     dtype=torch.long, device=pred_tokens.device)
+        target_cls_idx[item_indices, best_anchor_idx] = batch_target_tokens.argmax(dim=-1)
+        cls_loss = cls_criterion(pred_tokens.reshape(-1, pred_tokens.shape[-1]),
+                                 target_cls_idx.reshape(-1))
 
         # select predictions for best anchors for curve loss
         selected_pred_curves = pred_curves[torch.arange(pred_curves.shape[0]), best_anchor_idx]
@@ -207,7 +213,7 @@ class OrliSegmentationModel(L.LightningModule):
 
         self.val_mean = MeanMetric()
         self.curve_criterion = torch.nn.L1Loss(reduction='sum')
-        self.cls_criterion = partial(sigmoid_focal_loss, reduction='sum')
+        self.cls_criterion = torch.nn.CrossEntropyLoss(reduction='sum')
 
     def forward(self, x):
         return self.model(pixel_values=x)

@@ -26,7 +26,8 @@ from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                           TransformerCrossAttentionLayer, FeedForward,
                           TransformerDecoder, TransformerSelfAttentionLayer,
                           FusionLayer, scale_hidden_dim_for_mlp,
-                          Llama3ScaledRoPE, llama3_mlp)
+                          Llama3ScaledRoPE, llama3_mlp,
+                          PositionEmbeddingRandom)
 from orli.modules.transformer import _get_clones
 
 if TYPE_CHECKING:
@@ -184,22 +185,44 @@ def baseline_decoder(vocab_size: int = 12,
 
 class OrliAdapter(nn.Module):
     """
-    Builds an adapter head consisting of `num_layers` self attention layers
-    followed by a linear projection of encoder_embed_dim to decoder_embed_dim.
+    Builds an adapter head consisting of depthwise-separable downsampling
+    convolutions, `num_layers` self attention layers, a linear projection of
+    encoder_embed_dim to decoder_embed_dim, and 2D positional embeddings.
     """
     def __init__(self,
                  num_layers: int,
                  num_heads: int,
                  encoder_embed_dims: list[int],
-                 decoder_embed_dim: int):
+                 encoder_sizes: list[tuple[int, int]],
+                 decoder_embed_dim: int,
+                 ds_factors: list[int] = None):
         super().__init__()
+        if ds_factors is None:
+            ds_factors = [2] * len(encoder_embed_dims)
         mlp_ratio = 4
         num_kv_heads = num_heads
         self.adapter = nn.ModuleList()
+        self.downsample = nn.ModuleList()
+        self.pos_embeddings = nn.ModuleList()
+        self.output_sizes: list[tuple[int, int]] = []
 
-        for encoder_embed_dim in encoder_embed_dims:
+        for encoder_embed_dim, size, ds_factor in zip(encoder_embed_dims, encoder_sizes, ds_factors):
             hidden_dim = int(mlp_ratio * encoder_embed_dim)
             head_dim = encoder_embed_dim // num_heads
+
+            # depthwise-separable downsampling convolution
+            if ds_factor > 1:
+                self.downsample.append(nn.Sequential(
+                    nn.Conv2d(encoder_embed_dim, encoder_embed_dim,
+                              kernel_size=ds_factor, stride=ds_factor,
+                              groups=encoder_embed_dim, bias=False),
+                    nn.Conv2d(encoder_embed_dim, encoder_embed_dim,
+                              kernel_size=1, bias=False),
+                ))
+            else:
+                self.downsample.append(nn.Identity())
+            ds_size = (size[0] // ds_factor, size[1] // ds_factor)
+            self.output_sizes.append(ds_size)
 
             layers = []
             for _ in range(num_layers):
@@ -228,12 +251,15 @@ class OrliAdapter(nn.Module):
                 layers.append(layer)
             layers.append(nn.Linear(encoder_embed_dim, decoder_embed_dim))
             self.adapter.append(nn.Sequential(*layers))
+            self.pos_embeddings.append(PositionEmbeddingRandom(decoder_embed_dim, ds_size))
 
     def forward(self, encoder_hidden_states: list[torch.Tensor]) -> torch.Tensor:
         os = []
         for idx, hidden_state in enumerate(encoder_hidden_states):
+            hidden_state = self.downsample[idx](hidden_state)
             hidden_state = hidden_state.flatten(-2).transpose(-1, -2)
-            os.append(self.adapter[idx](hidden_state))
+            hidden_state = self.adapter[idx](hidden_state)
+            os.append(self.pos_embeddings[idx](hidden_state))
         return torch.cat(os, dim=1)
 
 
