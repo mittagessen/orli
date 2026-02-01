@@ -41,7 +41,7 @@ class OrliModel(nn.Module, BaseModel):
 
     Args:
     """
-    bos_id: int = 2
+    bos_id: int = 1
     eos_id: int = 2
     user_metadata = {}
     model_type = 'segmentation'
