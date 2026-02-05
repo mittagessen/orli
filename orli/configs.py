@@ -28,7 +28,7 @@ class OrliSegmentationTrainingConfig(TrainingConfig):
 
 class OrliSegmentationTrainingDataConfig(SegmentationTrainingDataConfig):
     """
-    Base data configuration for a D-FINE segmentation model.
+    Base data configuration for a Orli segmentation model.
     """
     def __init__(self, **kwargs):
         self.val_batch_size = kwargs.pop('val_batch_size', None)
