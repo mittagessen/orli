@@ -16,18 +16,19 @@
 Training loop interception helpers
 """
 import torch
+import torch.nn.functional as F
 import logging
 import lightning.pytorch as L
 
 from functools import partial
 from lightning.pytorch.callbacks import EarlyStopping
-from torch.optim import lr_scheduler
+from torch.optim import lr_scheduler, AdamW
 from torchmetrics.aggregation import MeanMetric
 from torch.utils.data import DataLoader
+from torchvision.ops import sigmoid_focal_loss
 from typing import Optional, Union, TYPE_CHECKING
 
 from kraken.models import create_model
-from kraken.train.utils import configure_optimizer_and_lr_scheduler
 
 from orli.modules.bezier import sample_bezier_curve
 from orli.dataset import (get_default_transforms, BaselineSegmentationDataset,
@@ -42,9 +43,15 @@ if TYPE_CHECKING:
     from os import PathLike
 
 
+# Iteration weights for auxiliary losses (progressive weighting for 4 iterations)
+ITERATION_WEIGHTS = [0.4, 0.6, 0.8, 1.0]
+
+# Temperature for soft anchor assignment
+ANCHOR_TEMPERATURE = 0.1
+
+
 @torch.compile()
 def model_step(model,
-               cls_criterion,
                curve_criterion,
                batch):
 
@@ -69,16 +76,19 @@ def model_step(model,
     losses = None
     num_lines = target_tokens[target_tokens != -1].view(-1, 4).shape[0]
 
-    # match ground truth curves to anchors
+    # match ground truth curves to anchors using soft assignment
     valid_targets_mask = target_curves[..., 0] != -1
     valid_target_curves = target_curves[valid_targets_mask]
     anchors = model.nn['regressor'].curve_anchors
     # l1 distance between each target curve and each anchor
     l1_dist = torch.cdist(valid_target_curves, anchors, p=1)
-    # find best anchor for each target curve
-    best_anchor_idx = torch.argmin(l1_dist, dim=-1)
+    # soft anchor assignment with temperature scaling
+    anchor_weights = torch.softmax(-l1_dist / ANCHOR_TEMPERATURE, dim=-1)
 
-    for pred_curves, pred_tokens in zip(logits['curves'], logits['tokens']):
+    for iter_idx, (pred_curves, pred_tokens) in enumerate(zip(logits['curves'], logits['tokens'])):
+        # get iteration weight
+        iter_weight = ITERATION_WEIGHTS[iter_idx] if iter_idx < len(ITERATION_WEIGHTS) else 1.0
+
         # filter out ignored indices from predictions
         pred_curves = pred_curves[valid_targets_mask]
         pred_tokens = pred_tokens[valid_targets_mask]
@@ -87,24 +97,39 @@ def model_step(model,
         batch_target_curves = target_curves[valid_targets_mask]
         batch_target_tokens = target_tokens[valid_targets_mask]
 
-        # create target for classification loss
-        item_indices = torch.arange(pred_tokens.shape[0])
+        # create target for classification loss using soft anchor weights
+        # target_cls_idx has shape [num_valid, num_anchors] with class indices
+        item_indices = torch.arange(pred_tokens.shape[0], device=pred_tokens.device)
         target_cls_idx = torch.zeros(pred_tokens.shape[0], pred_tokens.shape[1],
                                      dtype=torch.long, device=pred_tokens.device)
+        # use hard assignment for the target class index (argmax of target tokens)
+        best_anchor_idx = torch.argmax(anchor_weights, dim=-1)
         target_cls_idx[item_indices, best_anchor_idx] = batch_target_tokens.argmax(dim=-1)
-        cls_loss = cls_criterion(pred_tokens.reshape(-1, pred_tokens.shape[-1]),
-                                 target_cls_idx.reshape(-1))
 
-        # select predictions for best anchors for curve loss
-        selected_pred_curves = pred_curves[torch.arange(pred_curves.shape[0]), best_anchor_idx]
+        # focal loss for classification
+        num_classes = pred_tokens.shape[-1]
+        target_one_hot = F.one_hot(target_cls_idx.reshape(-1), num_classes=num_classes).float()
+        cls_loss = sigmoid_focal_loss(
+            pred_tokens.reshape(-1, num_classes),
+            target_one_hot,
+            alpha=0.25,
+            gamma=2.0,
+            reduction='sum'
+        )
+
+        # weighted curve loss using soft anchor assignment
+        # pred_curves shape: [num_valid, num_anchors, 8]
+        # anchor_weights shape: [num_valid, num_anchors]
+        # compute weighted sum of predicted curves
+        selected_pred_curves = torch.einsum('na,nad->nd', anchor_weights, pred_curves)
 
         # sample points from curves
         pred_points = sample_bezier_curve(selected_pred_curves)
         target_points = sample_bezier_curve(batch_target_curves)
         curve_loss = curve_criterion(pred_points, target_points)
 
-        _loss = 2 * cls_loss + 5 * curve_loss
-        losses = _loss if not losses else losses + _loss
+        _loss = iter_weight * (2 * cls_loss + 5 * curve_loss)
+        losses = _loss if losses is None else losses + _loss
     return losses / (logits['curves'].shape[0] * num_lines)
 
 
@@ -213,14 +238,12 @@ class OrliSegmentationModel(L.LightningModule):
 
         self.val_mean = MeanMetric()
         self.curve_criterion = torch.nn.L1Loss(reduction='sum')
-        self.cls_criterion = torch.nn.CrossEntropyLoss(reduction='sum')
 
     def forward(self, x):
         return self.model(pixel_values=x)
 
     def training_step(self, batch, batch_idx):
         loss = model_step(self.net,
-                          self.cls_criterion,
                           self.curve_criterion,
                           batch)
         self.log('train_loss',
@@ -234,7 +257,6 @@ class OrliSegmentationModel(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         loss = model_step(self.net,
-                          self.cls_criterion,
                           self.curve_criterion,
                           batch)
         self.val_mean.update(loss)
@@ -323,21 +345,91 @@ class OrliSegmentationModel(L.LightningModule):
     # batch-wise learning rate warmup. In lr_scheduler_step() calls to the
     # scheduler are then only performed at the end of the epoch.
     def configure_optimizers(self):
-        return configure_optimizer_and_lr_scheduler(self.hparams.config,
-                                                    self.net.parameters(),
-                                                    len_train_set=len(self.trainer.datamodule.train_set),
-                                                    loss_tracking_mode='min')
+        # Selective learning rates: lower LR for pretrained encoder, full LR for decoder
+        param_groups = []
+
+        # Encoder (pretrained) - lower LR when unfrozen
+        encoder_params = list(self.net.nn['encoder'].parameters())
+        encoder_lr = self.hparams.config.lrate * 0.1  # 10x lower for pretrained encoder
+        if any(p.requires_grad for p in encoder_params):
+            param_groups.append({
+                'params': [p for p in encoder_params if p.requires_grad],
+                'lr': encoder_lr,
+                'initial_lr': encoder_lr,  # Store for warmup
+            })
+
+        # Everything else (decoder, adapter, regressor) - full LR
+        encoder_param_ids = {id(p) for p in encoder_params}
+        other_params = [p for p in self.net.parameters()
+                        if id(p) not in encoder_param_ids and p.requires_grad]
+        if other_params:
+            param_groups.append({
+                'params': other_params,
+                'lr': self.hparams.config.lrate,
+                'initial_lr': self.hparams.config.lrate,  # Store for warmup
+            })
+
+        optimizer = AdamW(param_groups, weight_decay=self.hparams.config.weight_decay)
+
+        # Configure learning rate scheduler
+        len_train_set = len(self.trainer.datamodule.train_set)
+        batch_size = self.trainer.datamodule.hparams.data_config.batch_size
+        accumulate = self.hparams.config.accumulate_grad_batches
+        steps_per_epoch = len_train_set // (batch_size * accumulate)
+
+        if self.hparams.config.schedule == 'cosine':
+            scheduler = lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=self.hparams.config.cos_max_t * steps_per_epoch,
+                eta_min=self.hparams.config.cos_min_lr
+            )
+        elif self.hparams.config.schedule == 'reduceonplateau':
+            scheduler = lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode='min',
+                factor=0.1,
+                patience=5
+            )
+        elif self.hparams.config.schedule == 'exponential':
+            scheduler = lr_scheduler.ExponentialLR(
+                optimizer,
+                gamma=self.hparams.config.exp_gamma
+            )
+        elif self.hparams.config.schedule == 'step':
+            scheduler = lr_scheduler.StepLR(
+                optimizer,
+                step_size=self.hparams.config.step_size,
+                gamma=self.hparams.config.step_gamma
+            )
+        elif self.hparams.config.schedule == '1cycle':
+            scheduler = lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=self.hparams.config.lrate,
+                total_steps=self.hparams.config.epochs * steps_per_epoch
+            )
+        else:
+            scheduler = lr_scheduler.ConstantLR(optimizer, factor=1.0)
+
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {
+                'scheduler': scheduler,
+                'monitor': 'val_metric',
+                'interval': 'step' if self.hparams.config.schedule == '1cycle' else 'epoch',
+                'frequency': 1,
+            }
+        }
 
     def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure):
         # update params
         optimizer.step(closure=optimizer_closure)
 
-        # linear warmup between 0 and the initial learning rate `lrate` in `warmup`
-        # steps.
+        # linear warmup between 0 and the initial learning rate in `warmup` steps.
+        # Each param group has its own target lr (encoder has lower lr).
         if self.hparams.config.warmup and self.trainer.global_step < self.hparams.config.warmup:
             lr_scale = min(1.0, float(self.trainer.global_step + 1) / self.hparams.config.warmup)
             for pg in optimizer.param_groups:
-                pg["lr"] = lr_scale * self.hparams.config.lrate
+                pg["lr"] = lr_scale * pg.get("initial_lr", self.hparams.config.lrate)
 
     def lr_scheduler_step(self, scheduler, metric):
         if not self.hparams.config.warmup or self.trainer.global_step >= self.hparams.config.warmup:

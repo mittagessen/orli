@@ -263,9 +263,22 @@ class OrliAdapter(nn.Module):
         return torch.cat(os, dim=1)
 
 
+def inverse_sigmoid(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+    """
+    Inverse sigmoid (logit) function with clamping for numerical stability.
+    """
+    x = x.clamp(min=eps, max=1 - eps)
+    return torch.log(x / (1 - x))
+
+
 class CurveRegressionHead(nn.Module):
     """
     Iterative refinement regression head for baseline curves.
+
+    Uses sigmoid/inverse-sigmoid refinement: offsets are predicted in logit
+    space and combined with the previous iteration's curves via inverse
+    sigmoid, addition, and sigmoid. This ensures outputs stay in [0,1] and
+    provides better gradient flow near boundaries.
     """
 
     def __init__(self,
@@ -276,7 +289,8 @@ class CurveRegressionHead(nn.Module):
                  num_iterations: int = 4):
         super().__init__()
         reg_proj = nn.Sequential()
-        self.register_buffer('curve_anchors', torch.load(anchors, map_location='cpu'))
+        # Clamp anchors to valid sigmoid range
+        self.register_buffer('curve_anchors', torch.load(anchors, map_location='cpu').clamp(1e-5, 1 - 1e-5))
         self.num_anchors = self.curve_anchors.shape[0]
 
         if num_layers > 1:
@@ -304,9 +318,11 @@ class CurveRegressionHead(nn.Module):
         _curves: list[torch.Tensor] = [self.curve_anchors.unsqueeze(0).unsqueeze(0).expand(batch_size, seq_len, -1, -1)]
         _logits: list[torch.Tensor] = []
         for cls_proj, reg_proj, layer in zip(self.cls_projs, self.reg_projs, xs):
-            curves = _curves[-1].detach()
+            curves = _curves[-1]  # Allow gradient flow through refinement iterations
             offsets = reg_proj(layer).view(batch_size, seq_len, self.num_anchors, 8)
-            _curves.append(curves + offsets)
+            # Sigmoid/inverse-sigmoid refinement: add offsets in logit space
+            curves_logits = inverse_sigmoid(curves)
+            _curves.append(torch.sigmoid(curves_logits + offsets))
             _logits.append(cls_proj(layer).view(batch_size, seq_len, self.num_anchors, -1))
 
         return {'curves': torch.stack(_curves[1:]),

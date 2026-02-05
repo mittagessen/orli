@@ -15,12 +15,12 @@ class OrliSegmentationTrainingConfig(TrainingConfig):
 
         kwargs.setdefault('quit', 'fixed')
         kwargs.setdefault('epochs', 16)
-        kwargs.setdefault('lrate', 5e-5)
-        kwargs.setdefault('weight_decay', 1e-5)
+        kwargs.setdefault('lrate', 1e-4)
+        kwargs.setdefault('weight_decay', 1e-4)
         kwargs.setdefault('schedule', 'cosine')
         kwargs.setdefault('cos_max_t', 16)
-        kwargs.setdefault('cos_min_lr', 5e-6)
-        kwargs.setdefault('warmup', 1000)
+        kwargs.setdefault('cos_min_lr', 1e-5)
+        kwargs.setdefault('warmup', 2000)
         kwargs.setdefault('accumulate_grad_batches', 8)
 
         super().__init__(**kwargs)
