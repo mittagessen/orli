@@ -16,7 +16,6 @@
 Training loop interception helpers
 """
 import torch
-import torch.nn.functional as F
 import logging
 import lightning.pytorch as L
 
@@ -25,7 +24,6 @@ from lightning.pytorch.callbacks import EarlyStopping
 from torch.optim import lr_scheduler, AdamW
 from torchmetrics.aggregation import MeanMetric
 from torch.utils.data import DataLoader
-from torchvision.ops import sigmoid_focal_loss
 from typing import Optional, Union, TYPE_CHECKING
 
 from kraken.models import create_model
@@ -43,15 +41,13 @@ if TYPE_CHECKING:
     from os import PathLike
 
 
-# Iteration weights for auxiliary losses (progressive weighting for 4 iterations)
-ITERATION_WEIGHTS = [0.4, 0.6, 0.8, 1.0]
-
 # Temperature for soft anchor assignment
 ANCHOR_TEMPERATURE = 0.1
 
 
 @torch.compile()
 def model_step(model,
+               cls_criterion,
                curve_criterion,
                batch):
 
@@ -84,11 +80,10 @@ def model_step(model,
     l1_dist = torch.cdist(valid_target_curves, anchors, p=1)
     # soft anchor assignment with temperature scaling
     anchor_weights = torch.softmax(-l1_dist / ANCHOR_TEMPERATURE, dim=-1)
+    # best anchor for classification target
+    best_anchor_idx = torch.argmax(anchor_weights, dim=-1)
 
-    for iter_idx, (pred_curves, pred_tokens) in enumerate(zip(logits['curves'], logits['tokens'])):
-        # get iteration weight
-        iter_weight = ITERATION_WEIGHTS[iter_idx] if iter_idx < len(ITERATION_WEIGHTS) else 1.0
-
+    for pred_curves, pred_tokens in zip(logits['curves'], logits['tokens']):
         # filter out ignored indices from predictions
         pred_curves = pred_curves[valid_targets_mask]
         pred_tokens = pred_tokens[valid_targets_mask]
@@ -97,25 +92,13 @@ def model_step(model,
         batch_target_curves = target_curves[valid_targets_mask]
         batch_target_tokens = target_tokens[valid_targets_mask]
 
-        # create target for classification loss using soft anchor weights
+        # create target for classification loss
         # target_cls_idx has shape [num_valid, num_anchors] with class indices
         item_indices = torch.arange(pred_tokens.shape[0], device=pred_tokens.device)
         target_cls_idx = torch.zeros(pred_tokens.shape[0], pred_tokens.shape[1],
                                      dtype=torch.long, device=pred_tokens.device)
-        # use hard assignment for the target class index (argmax of target tokens)
-        best_anchor_idx = torch.argmax(anchor_weights, dim=-1)
         target_cls_idx[item_indices, best_anchor_idx] = batch_target_tokens.argmax(dim=-1)
-
-        # focal loss for classification
-        num_classes = pred_tokens.shape[-1]
-        target_one_hot = F.one_hot(target_cls_idx.reshape(-1), num_classes=num_classes).float()
-        cls_loss = sigmoid_focal_loss(
-            pred_tokens.reshape(-1, num_classes),
-            target_one_hot,
-            alpha=0.25,
-            gamma=2.0,
-            reduction='sum'
-        )
+        cls_loss = cls_criterion(pred_tokens.reshape(-1, pred_tokens.shape[-1]), target_cls_idx.reshape(-1))
 
         # weighted curve loss using soft anchor assignment
         # pred_curves shape: [num_valid, num_anchors, 8]
@@ -128,7 +111,7 @@ def model_step(model,
         target_points = sample_bezier_curve(batch_target_curves)
         curve_loss = curve_criterion(pred_points, target_points)
 
-        _loss = iter_weight * (2 * cls_loss + 5 * curve_loss)
+        _loss = 2 * cls_loss + 5 * curve_loss
         losses = _loss if losses is None else losses + _loss
     return losses / (logits['curves'].shape[0] * num_lines)
 
@@ -237,6 +220,7 @@ class OrliSegmentationModel(L.LightningModule):
             self.net = None
 
         self.val_mean = MeanMetric()
+        self.cls_criterion = torch.nn.CrossEntropyLoss(reduction='sum')
         self.curve_criterion = torch.nn.L1Loss(reduction='sum')
 
     def forward(self, x):
@@ -244,6 +228,7 @@ class OrliSegmentationModel(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         loss = model_step(self.net,
+                          self.cls_criterion,
                           self.curve_criterion,
                           batch)
         self.log('train_loss',
@@ -257,6 +242,7 @@ class OrliSegmentationModel(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         loss = model_step(self.net,
+                          self.cls_criterion,
                           self.curve_criterion,
                           batch)
         self.val_mean.update(loss)
