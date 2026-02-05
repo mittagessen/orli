@@ -380,7 +380,7 @@ class OrliSegmentationModel(L.LightningModule):
         if self.hparams.config.schedule == 'cosine':
             scheduler = lr_scheduler.CosineAnnealingLR(
                 optimizer,
-                T_max=self.hparams.config.cos_max_t * steps_per_epoch,
+                T_max=self.hparams.config.cos_t_max * steps_per_epoch,
                 eta_min=self.hparams.config.cos_min_lr
             )
         elif self.hparams.config.schedule == 'reduceonplateau':
