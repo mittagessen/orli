@@ -100,10 +100,6 @@ def model_step(model,
         target_cls_idx[item_indices, best_anchor_idx] = batch_target_tokens.argmax(dim=-1)
         cls_loss = cls_criterion(pred_tokens.reshape(-1, pred_tokens.shape[-1]), target_cls_idx.reshape(-1))
 
-        # weighted curve loss using soft anchor assignment
-        # pred_curves shape: [num_valid, num_anchors, 8]
-        # anchor_weights shape: [num_valid, num_anchors]
-        # compute weighted sum of predicted curves
         selected_pred_curves = torch.einsum('na,nad->nd', anchor_weights, pred_curves)
 
         # sample points from curves
