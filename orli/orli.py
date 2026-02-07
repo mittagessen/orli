@@ -291,14 +291,9 @@ class OrliModel(nn.Module, BaseModel):
                               mask=curr_masks,
                               input_pos=self._input_pos[:, :1].squeeze())
 
-        # select best anchor based on confidence
-        token_logits = logits['tokens'][-1, :, -1, :, :]
-        confidences, _ = torch.max(torch.softmax(token_logits, dim=-1), dim=-1)
-        best_anchor_idx = torch.argmax(confidences, dim=-1)
-        batch_indices = torch.arange(token_logits.shape[0], device=token_logits.device)
-
-        tokens = torch.argmax(token_logits[batch_indices, best_anchor_idx], dim=-1).unsqueeze(-1)
-        curves = logits['curves'][-1, :, -1, :, :][batch_indices, best_anchor_idx]
+        token_logits = logits['tokens'][-1, :, -1, :]
+        tokens = torch.argmax(token_logits, dim=-1).unsqueeze(-1)
+        curves = logits['curves'][-1, :, -1, :]
         generated_curves = [curves]
 
         curr_pos = 1
@@ -318,20 +313,16 @@ class OrliModel(nn.Module, BaseModel):
             curr_masks = self._masks[:, curr_pos, None, :]
 
             # no need for encoder embeddings anymore as they're in the cache now
-            input_tok = F.one_hot(tokens.squeeze(-1), num_classes=self.curve_reg.cls_projs[0][-1].out_features // self.curve_reg.num_anchors).to(device=encoder_hidden_states.device)
+            num_cls = logits['tokens'].shape[-1]
+            input_tok = F.one_hot(tokens.squeeze(-1), num_classes=num_cls).to(device=encoder_hidden_states.device)
             logits = self.forward(tokens=torch.cat([input_tok.unsqueeze(1),
                                                     curves.unsqueeze(1)], dim=-1),
                                   mask=curr_masks,
                                   input_pos=curr_input_pos)
 
-            # select best anchor based on confidence
-            token_logits = logits['tokens'][-1, :, -1, :, :]
-            confidences, _ = torch.max(torch.softmax(token_logits, dim=-1), dim=-1)
-            best_anchor_idx = torch.argmax(confidences, dim=-1)
-            batch_indices = torch.arange(token_logits.shape[0], device=token_logits.device)
-
-            tokens = torch.argmax(token_logits[batch_indices, best_anchor_idx], dim=-1).unsqueeze(-1)
-            curves = logits['curves'][-1, :, -1, :, :][batch_indices, best_anchor_idx]
+            token_logits = logits['tokens'][-1, :, -1, :]
+            tokens = torch.argmax(token_logits, dim=-1).unsqueeze(-1)
+            curves = logits['curves'][-1, :, -1, :]
             generated_curves.append(curves)
 
             curr_pos += 1

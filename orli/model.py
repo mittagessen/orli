@@ -41,10 +41,6 @@ if TYPE_CHECKING:
     from os import PathLike
 
 
-# Temperature for soft anchor assignment
-ANCHOR_TEMPERATURE = 0.1
-
-
 @torch.compile()
 def model_step(model,
                cls_criterion,
@@ -72,16 +68,7 @@ def model_step(model,
     losses = None
     num_lines = target_tokens[target_tokens != -1].view(-1, 4).shape[0]
 
-    # match ground truth curves to anchors using soft assignment
     valid_targets_mask = target_curves[..., 0] != -1
-    valid_target_curves = target_curves[valid_targets_mask]
-    anchors = model.nn['regressor'].curve_anchors
-    # l1 distance between each target curve and each anchor
-    l1_dist = torch.cdist(valid_target_curves, anchors, p=1)
-    # soft anchor assignment with temperature scaling
-    anchor_weights = torch.softmax(-l1_dist / ANCHOR_TEMPERATURE, dim=-1)
-    # best anchor for classification target
-    best_anchor_idx = torch.argmax(anchor_weights, dim=-1)
 
     for pred_curves, pred_tokens in zip(logits['curves'], logits['tokens']):
         # filter out ignored indices from predictions
@@ -92,18 +79,11 @@ def model_step(model,
         batch_target_curves = target_curves[valid_targets_mask]
         batch_target_tokens = target_tokens[valid_targets_mask]
 
-        # create target for classification loss
-        # target_cls_idx has shape [num_valid, num_anchors] with class indices
-        item_indices = torch.arange(pred_tokens.shape[0], device=pred_tokens.device)
-        target_cls_idx = torch.zeros(pred_tokens.shape[0], pred_tokens.shape[1],
-                                     dtype=torch.long, device=pred_tokens.device)
-        target_cls_idx[item_indices, best_anchor_idx] = batch_target_tokens.argmax(dim=-1)
-        cls_loss = cls_criterion(pred_tokens.reshape(-1, pred_tokens.shape[-1]), target_cls_idx.reshape(-1))
-
-        selected_pred_curves = torch.einsum('na,nad->nd', anchor_weights, pred_curves)
+        num_cls = pred_tokens.shape[-1]
+        cls_loss = cls_criterion(pred_tokens.reshape(-1, num_cls), batch_target_tokens.argmax(dim=-1).reshape(-1))
 
         # sample points from curves
-        pred_points = sample_bezier_curve(selected_pred_curves)
+        pred_points = sample_bezier_curve(pred_curves)
         target_points = sample_bezier_curve(batch_target_curves)
         curve_loss = curve_criterion(pred_points, target_points)
 
@@ -397,7 +377,7 @@ class OrliSegmentationModel(L.LightningModule):
             'lr_scheduler': {
                 'scheduler': scheduler,
                 'monitor': 'val_metric',
-                'interval': 'step' if self.hparams.config.schedule == '1cycle' else 'epoch',
+                'interval': 'step' if self.hparams.config.schedule in ('1cycle', 'cosine') else 'epoch',
                 'frequency': 1,
             }
         }
@@ -415,10 +395,8 @@ class OrliSegmentationModel(L.LightningModule):
 
     def lr_scheduler_step(self, scheduler, metric):
         if not self.hparams.config.warmup or self.trainer.global_step >= self.hparams.config.warmup:
-            # step OneCycleLR each batch if not in warmup phase
-            if isinstance(scheduler, lr_scheduler.OneCycleLR):
+            if isinstance(scheduler, (lr_scheduler.OneCycleLR, lr_scheduler.CosineAnnealingLR)):
                 scheduler.step()
-            # step every other scheduler epoch-wise
             elif self.trainer.is_last_batch:
                 if metric is None:
                     scheduler.step()

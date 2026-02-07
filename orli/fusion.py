@@ -49,7 +49,6 @@ def baseline_decoder(vocab_size: int = 12,
                      norm_eps: int = 1e-5,
                      rope_base: int = 10000,
                      encoder_sizes: list[tuple[int, int]] = None,  # start of fusion parameters
-                     fusion_interval: int = 2,
                      pretrained: Optional[str] = None,
                      **kwargs) -> TransformerDecoder:
     """
@@ -90,8 +89,7 @@ def baseline_decoder(vocab_size: int = 12,
               'attn_dropout': attn_dropout,
               'norm_eps': norm_eps,
               'rope_base': rope_base,
-              'encoder_max_seq_len': encoder_max_seq_len,
-              'fusion_interval': fusion_interval}
+              'encoder_max_seq_len': encoder_max_seq_len}
 
     if pretrained:
         vocab_size = config.pop('vocab_size')
@@ -131,36 +129,33 @@ def baseline_decoder(vocab_size: int = 12,
             mlp_norm=RMSNorm(dim=embed_dim, eps=1e-5),
         )
 
-        if idx % config['fusion_interval'] == 0:
-            attn = MultiHeadAttention(
-                embed_dim=config['embed_dim'],
-                num_heads=config['num_heads'],
-                num_kv_heads=config['num_kv_heads'],
-                head_dim=head_dim,
-                q_proj=nn.Linear(config['embed_dim'], config['num_heads'] * head_dim, bias=False),
-                k_proj=nn.Linear(config['embed_dim'], config['num_kv_heads'] * head_dim, bias=False),
-                v_proj=nn.Linear(config['embed_dim'], config['num_kv_heads'] * head_dim, bias=False),
-                output_proj=nn.Linear(config['embed_dim'], config['embed_dim'], bias=False),
-                q_norm=RMSNorm(dim=head_dim, eps=1e-05),
-                k_norm=RMSNorm(dim=head_dim, eps=1e-05),
-                pos_embeddings=None,
-                max_seq_len=config['encoder_max_seq_len'],
-                is_causal=False,
-                attn_dropout=0.0,
-            )
+        attn = MultiHeadAttention(
+            embed_dim=config['embed_dim'],
+            num_heads=config['num_heads'],
+            num_kv_heads=config['num_kv_heads'],
+            head_dim=head_dim,
+            q_proj=nn.Linear(config['embed_dim'], config['num_heads'] * head_dim, bias=False),
+            k_proj=nn.Linear(config['embed_dim'], config['num_kv_heads'] * head_dim, bias=False),
+            v_proj=nn.Linear(config['embed_dim'], config['num_kv_heads'] * head_dim, bias=False),
+            output_proj=nn.Linear(config['embed_dim'], config['embed_dim'], bias=False),
+            q_norm=RMSNorm(dim=head_dim, eps=1e-05),
+            k_norm=RMSNorm(dim=head_dim, eps=1e-05),
+            pos_embeddings=None,
+            max_seq_len=config['encoder_max_seq_len'],
+            is_causal=False,
+            attn_dropout=0.0,
+        )
 
-            mlp = llama3_mlp(dim=config['embed_dim'], hidden_dim=hidden_dim)
-            xattn_layer = TransformerCrossAttentionLayer(
-                attn=attn,
-                mlp=mlp,
-                ca_norm=RMSNorm(dim=embed_dim),
-                mlp_norm=RMSNorm(dim=embed_dim),
-                ca_scale=TanhGate(),
-                mlp_scale=TanhGate(),
-            )
-            layers.append(FusionLayer(layer=decoder_layer, fusion_layer=xattn_layer))
-        else:
-            layers.append(decoder_layer)
+        xattn_mlp = llama3_mlp(dim=config['embed_dim'], hidden_dim=hidden_dim)
+        xattn_layer = TransformerCrossAttentionLayer(
+            attn=attn,
+            mlp=xattn_mlp,
+            ca_norm=RMSNorm(dim=embed_dim),
+            mlp_norm=RMSNorm(dim=embed_dim),
+            ca_scale=TanhGate(),
+            mlp_scale=TanhGate(),
+        )
+        layers.append(FusionLayer(layer=decoder_layer, fusion_layer=xattn_layer))
 
     line_embeddings = nn.Linear(config['vocab_size'], config['embed_dim'], bias=False)
 
@@ -171,7 +166,7 @@ def baseline_decoder(vocab_size: int = 12,
                                  head_dim=head_dim,
                                  norm=RMSNorm(config['embed_dim'], eps=1e-05),
                                  output=nn.Identity(),
-                                 output_hidden_states=list(range(0, num_layers-1, 2)))
+                                 output_hidden_states=[2, 5, 8])
 
     if pretrained:
         weight_path = hf_hub_download(repo_id=pretrained, filename='model.safetensors')
@@ -290,14 +285,18 @@ class CurveRegressionHead(nn.Module):
         super().__init__()
         reg_proj = nn.Sequential()
         self.register_buffer('curve_anchors', torch.load(anchors, map_location='cpu').clamp(1e-5, 1 - 1e-5))
-        self.num_anchors = self.curve_anchors.shape[0]
+
+        self.norms = nn.ModuleList([RMSNorm(embed_dim) for _ in range(num_iterations)])
 
         if num_layers > 1:
             for n in range(num_layers-1):
                 reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
                 reg_proj.append(nn.SiLU())
-        reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, self.num_anchors * 8))
-        cls_proj = nn.Linear(embed_dim, self.num_anchors * num_cls)
+        reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, 8))
+        # zero-initialize the final layer for near-zero initial offsets
+        nn.init.zeros_(reg_proj[-1].weight)
+        nn.init.zeros_(reg_proj[-1].bias)
+        cls_proj = nn.Linear(embed_dim, num_cls)
         self.reg_projs = _get_clones(reg_proj, num_iterations)
         self.cls_projs = _get_clones(cls_proj, num_iterations)
 
@@ -308,20 +307,21 @@ class CurveRegressionHead(nn.Module):
                 ``[b, s, d_e]`` where ``d_e`` is the decoder embedding dim.
 
         Returns:
-            A dictionary containing an output tensor with shape ``[num_iterations, b, s, num_anchors, 8]``
+            A dictionary containing an output tensor with shape ``[num_iterations, b, s, 8]``
             under the key `curves` and the class logits in `tokens` with shape
-            ``[num_iterations, b, s, num_anchors, num_cls]``.
+            ``[num_iterations, b, s, num_cls]``.
         """
         batch_size, seq_len, _ = xs[0].shape
-        # expand anchors to batch and sequence dimensions
-        _curves: list[torch.Tensor] = [self.curve_anchors.unsqueeze(0).unsqueeze(0).expand(batch_size, seq_len, -1, -1)]
+        # expand anchor to batch and sequence dimensions [1, 8] -> [b, s, 8]
+        _curves: list[torch.Tensor] = [self.curve_anchors.unsqueeze(0).expand(batch_size, seq_len, -1)]
         _logits: list[torch.Tensor] = []
-        for cls_proj, reg_proj, layer in zip(self.cls_projs, self.reg_projs, xs):
+        for norm, cls_proj, reg_proj, layer in zip(self.norms, self.cls_projs, self.reg_projs, xs):
             curves = _curves[-1]
-            offsets = reg_proj(layer).view(batch_size, seq_len, self.num_anchors, 8)
+            layer = norm(layer)
+            offsets = reg_proj(layer)
             curves_logits = inverse_sigmoid(curves)
             _curves.append(torch.sigmoid(curves_logits + offsets))
-            _logits.append(cls_proj(layer).view(batch_size, seq_len, self.num_anchors, -1))
+            _logits.append(cls_proj(layer))
 
         return {'curves': torch.stack(_curves[1:]),
                 'tokens': torch.stack(_logits)}
