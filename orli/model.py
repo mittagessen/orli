@@ -378,7 +378,7 @@ class OrliSegmentationModel(L.LightningModule):
             'lr_scheduler': {
                 'scheduler': scheduler,
                 'monitor': 'val_metric',
-                'interval': 'step' if self.hparams.config.schedule in ('1cycle', 'cosine') else 'epoch',
+                'interval': 'step',
                 'frequency': 1,
             }
         }
