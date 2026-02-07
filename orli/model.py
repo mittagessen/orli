@@ -337,7 +337,8 @@ class OrliSegmentationModel(L.LightningModule):
         len_train_set = len(self.trainer.datamodule.train_set)
         batch_size = self.trainer.datamodule.hparams.data_config.batch_size
         accumulate = self.hparams.config.accumulate_grad_batches
-        steps_per_epoch = len_train_set // (batch_size * accumulate)
+        num_devices = max(1, self.trainer.num_devices)
+        steps_per_epoch = len_train_set // (batch_size * accumulate * num_devices)
 
         if self.hparams.config.schedule == 'cosine':
             scheduler = lr_scheduler.CosineAnnealingLR(
