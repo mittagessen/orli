@@ -68,28 +68,33 @@ def model_step(model,
     losses = None
     num_lines = target_tokens[target_tokens != -1].view(-1, 4).shape[0]
 
-    valid_targets_mask = target_curves[..., 0] != -1
+    valid_tokens_mask = target_tokens[..., 0] != -1
+    valid_curves_mask = target_curves[..., 0] != -1
+    num_token_targets = valid_tokens_mask.sum().clamp_min(1)
+    num_curve_targets = valid_curves_mask.sum().clamp_min(1)
 
     for pred_curves, pred_tokens in zip(logits['curves'], logits['tokens']):
         # filter out ignored indices from predictions
-        pred_curves = pred_curves[valid_targets_mask]
-        pred_tokens = pred_tokens[valid_targets_mask]
+        pred_tokens = pred_tokens[valid_tokens_mask]
+        pred_curves = pred_curves[valid_curves_mask]
 
         # valid targets
-        batch_target_curves = target_curves[valid_targets_mask]
-        batch_target_tokens = target_tokens[valid_targets_mask]
+        batch_target_tokens = target_tokens[valid_tokens_mask]
+        batch_target_curves = target_curves[valid_curves_mask]
 
         num_cls = pred_tokens.shape[-1]
-        cls_loss = cls_criterion(pred_tokens.reshape(-1, num_cls), batch_target_tokens.argmax(dim=-1).reshape(-1))
+        cls_loss = cls_criterion(pred_tokens.reshape(-1, num_cls),
+                                 batch_target_tokens.argmax(dim=-1).reshape(-1))
+        cls_loss = cls_loss / num_token_targets
 
         # sample points from curves
         pred_points = sample_bezier_curve(pred_curves)
         target_points = sample_bezier_curve(batch_target_curves)
-        curve_loss = curve_criterion(pred_points, target_points)
+        curve_loss = curve_criterion(pred_points, target_points) / num_curve_targets
 
         _loss = 2 * cls_loss + 5 * curve_loss
         losses = _loss if losses is None else losses + _loss
-    return losses / (logits['curves'].shape[0] * num_lines)
+    return losses / logits['curves'].shape[0]
 
 
 class OrliSegmentationDataModule(L.LightningDataModule):
