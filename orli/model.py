@@ -94,7 +94,7 @@ def model_step(model,
         target_points = sample_bezier_curve(batch_target_curves)
         curve_loss = curve_criterion(pred_points, target_points) / num_curve_targets
 
-        _loss = 2 * cls_loss + 5 * curve_loss
+        _loss = cls_loss + 0.2 * curve_loss
         losses = _loss if losses is None else losses + _loss
         cls_losses = cls_loss if cls_losses is None else cls_losses + cls_loss
         curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
