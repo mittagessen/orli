@@ -84,7 +84,7 @@ class OrliModel(nn.Module, BaseModel):
 
         decoder_model = baseline_decoder(encoder_sizes=adapter.output_sizes)
 
-        curve_reg = CurveRegressionHead(embed_dim=decoder_model.tok_embeddings.out_features,
+        curve_reg = CurveRegressionHead(embed_dim=decoder_model.tok_embeddings.embed_dim,
                                         num_iterations=len(decoder_model.output_hidden_states) + 1,
                                         anchors=anchors_path)
 
