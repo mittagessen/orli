@@ -66,6 +66,8 @@ def model_step(model,
 
     logits = model(tokens=torch.cat([tokens, curves], dim=-1), encoder_input=batch['image'])
     losses = None
+    cls_losses = None
+    curve_losses = None
     num_lines = target_tokens[target_tokens != -1].view(-1, 4).shape[0]
 
     valid_tokens_mask = target_tokens[..., 0] != -1
@@ -94,7 +96,10 @@ def model_step(model,
 
         _loss = 2 * cls_loss + 5 * curve_loss
         losses = _loss if losses is None else losses + _loss
-    return losses / logits['curves'].shape[0]
+        cls_losses = cls_loss if cls_losses is None else cls_losses + cls_loss
+        curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
+    num_iters = logits['curves'].shape[0]
+    return losses / num_iters, cls_losses / num_iters, curve_losses / num_iters
 
 
 class OrliSegmentationDataModule(L.LightningDataModule):
@@ -208,12 +213,26 @@ class OrliSegmentationModel(L.LightningModule):
         return self.model(pixel_values=x)
 
     def training_step(self, batch, batch_idx):
-        loss = model_step(self.net,
-                          self.cls_criterion,
-                          self.curve_criterion,
-                          batch)
+        loss, cls_loss, curve_loss = model_step(self.net,
+                                                self.cls_criterion,
+                                                self.curve_criterion,
+                                                batch)
         self.log('train_loss',
                  loss,
+                 batch_size=batch['tokens'].shape[0],
+                 on_step=True,
+                 on_epoch=True,
+                 prog_bar=True,
+                 logger=True)
+        self.log('train_cls_loss',
+                 cls_loss,
+                 batch_size=batch['tokens'].shape[0],
+                 on_step=True,
+                 on_epoch=True,
+                 prog_bar=True,
+                 logger=True)
+        self.log('train_curve_loss',
+                 curve_loss,
                  batch_size=batch['tokens'].shape[0],
                  on_step=True,
                  on_epoch=True,
@@ -222,11 +241,27 @@ class OrliSegmentationModel(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss = model_step(self.net,
-                          self.cls_criterion,
-                          self.curve_criterion,
-                          batch)
+        loss, cls_loss, curve_loss = model_step(self.net,
+                                                self.cls_criterion,
+                                                self.curve_criterion,
+                                                batch)
         self.val_mean.update(loss)
+        self.log('val_cls_loss',
+                 cls_loss,
+                 batch_size=batch['tokens'].shape[0],
+                 on_step=False,
+                 on_epoch=True,
+                 prog_bar=True,
+                 logger=True,
+                 sync_dist=True)
+        self.log('val_curve_loss',
+                 curve_loss,
+                 batch_size=batch['tokens'].shape[0],
+                 on_step=False,
+                 on_epoch=True,
+                 prog_bar=True,
+                 logger=True,
+                 sync_dist=True)
         return loss
 
     def on_validation_epoch_end(self):
