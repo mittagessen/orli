@@ -96,7 +96,7 @@ def model_step(model,
         curve_ctrl_loss = curve_criterion(pred_curves, batch_target_curves) / num_curve_targets
         curve_loss = curve_points_loss + curve_ctrl_loss
 
-        _loss = cls_loss + 0.2 * curve_loss
+        _loss = cls_loss + curve_loss
         losses = _loss if losses is None else losses + _loss
         cls_losses = cls_loss if cls_losses is None else cls_losses + cls_loss
         curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
