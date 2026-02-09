@@ -69,8 +69,6 @@ def model_step(model,
     losses = None
     cls_losses = None
     curve_losses = None
-    last_pred_curves = None
-    num_lines = target_tokens[target_tokens != -1].view(-1, 4).shape[0]
 
     valid_tokens_mask = target_tokens[..., 0] != -1
     valid_curves_mask = target_curves[..., 0] != -1
@@ -102,22 +100,10 @@ def model_step(model,
         losses = _loss if losses is None else losses + _loss
         cls_losses = cls_loss if cls_losses is None else cls_losses + cls_loss
         curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
-        last_pred_curves = pred_curves
     num_iters = logits['curves'].shape[0]
-    if last_pred_curves is None or last_pred_curves.numel() == 0:
-        curve_mean = torch.zeros((), device=curves.device)
-        curve_min = torch.zeros((), device=curves.device)
-        curve_max = torch.zeros((), device=curves.device)
-    else:
-        curve_mean = last_pred_curves.mean()
-        curve_min = last_pred_curves.min()
-        curve_max = last_pred_curves.max()
     return (losses / num_iters,
             cls_losses / num_iters,
-            curve_losses / num_iters,
-            curve_mean,
-            curve_min,
-            curve_max)
+            curve_losses / num_iters)
 
 
 class OrliSegmentationDataModule(L.LightningDataModule):
@@ -231,10 +217,10 @@ class OrliSegmentationModel(L.LightningModule):
         return self.model(pixel_values=x)
 
     def training_step(self, batch, batch_idx):
-        loss, cls_loss, curve_loss, curve_mean, curve_min, curve_max = model_step(self.net,
-                                                                                  self.cls_criterion,
-                                                                                  self.curve_criterion,
-                                                                                  batch)
+        loss, cls_loss, curve_loss = model_step(self.net,
+                                                self.cls_criterion,
+                                                self.curve_criterion,
+                                                batch)
         self.log('train_loss',
                  loss,
                  batch_size=batch['tokens'].shape[0],
@@ -256,37 +242,13 @@ class OrliSegmentationModel(L.LightningModule):
                  on_epoch=True,
                  prog_bar=True,
                  logger=True)
-        if self.global_step % CURVE_STATS_INTERVAL == 0:
-            print(f'Pred curve stats: mean={curve_mean.item():.6f} '
-                  f'min={curve_min.item():.6f} max={curve_max.item():.6f}')
-            self.log('pred_curve_mean',
-                     curve_mean,
-                     batch_size=batch['tokens'].shape[0],
-                     on_step=True,
-                     on_epoch=False,
-                     prog_bar=False,
-                     logger=True)
-            self.log('pred_curve_min',
-                     curve_min,
-                     batch_size=batch['tokens'].shape[0],
-                     on_step=True,
-                     on_epoch=False,
-                     prog_bar=False,
-                     logger=True)
-            self.log('pred_curve_max',
-                     curve_max,
-                     batch_size=batch['tokens'].shape[0],
-                     on_step=True,
-                     on_epoch=False,
-                     prog_bar=False,
-                     logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss, cls_loss, curve_loss, curve_mean, curve_min, curve_max = model_step(self.net,
-                                                                                  self.cls_criterion,
-                                                                                  self.curve_criterion,
-                                                                                  batch)
+        loss, cls_loss, curve_loss = model_step(self.net,
+                                                self.cls_criterion,
+                                                self.curve_criterion,
+                                                batch)
         self.val_mean.update(loss)
         self.log('val_cls_loss',
                  cls_loss,
