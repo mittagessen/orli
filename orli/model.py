@@ -34,6 +34,7 @@ from orli.dataset import (get_default_transforms, BaselineSegmentationDataset,
 from orli.configs import OrliSegmentationTrainingConfig, OrliSegmentationTrainingDataConfig
 
 logger = logging.getLogger(__name__)
+CURVE_STATS_INTERVAL = 200
 
 
 if TYPE_CHECKING:
@@ -68,6 +69,7 @@ def model_step(model,
     losses = None
     cls_losses = None
     curve_losses = None
+    last_pred_curves = None
     num_lines = target_tokens[target_tokens != -1].view(-1, 4).shape[0]
 
     valid_tokens_mask = target_tokens[..., 0] != -1
@@ -92,14 +94,30 @@ def model_step(model,
         # sample points from curves
         pred_points = sample_bezier_curve(pred_curves)
         target_points = sample_bezier_curve(batch_target_curves)
-        curve_loss = curve_criterion(pred_points, target_points) / num_curve_targets
+        curve_points_loss = curve_criterion(pred_points, target_points) / num_curve_targets
+        curve_ctrl_loss = curve_criterion(pred_curves, batch_target_curves) / num_curve_targets
+        curve_loss = curve_points_loss + curve_ctrl_loss
 
         _loss = cls_loss + 0.2 * curve_loss
         losses = _loss if losses is None else losses + _loss
         cls_losses = cls_loss if cls_losses is None else cls_losses + cls_loss
         curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
+        last_pred_curves = pred_curves
     num_iters = logits['curves'].shape[0]
-    return losses / num_iters, cls_losses / num_iters, curve_losses / num_iters
+    if last_pred_curves is None or last_pred_curves.numel() == 0:
+        curve_mean = torch.zeros((), device=curves.device)
+        curve_min = torch.zeros((), device=curves.device)
+        curve_max = torch.zeros((), device=curves.device)
+    else:
+        curve_mean = last_pred_curves.mean()
+        curve_min = last_pred_curves.min()
+        curve_max = last_pred_curves.max()
+    return (losses / num_iters,
+            cls_losses / num_iters,
+            curve_losses / num_iters,
+            curve_mean,
+            curve_min,
+            curve_max)
 
 
 class OrliSegmentationDataModule(L.LightningDataModule):
@@ -213,10 +231,10 @@ class OrliSegmentationModel(L.LightningModule):
         return self.model(pixel_values=x)
 
     def training_step(self, batch, batch_idx):
-        loss, cls_loss, curve_loss = model_step(self.net,
-                                                self.cls_criterion,
-                                                self.curve_criterion,
-                                                batch)
+        loss, cls_loss, curve_loss, curve_mean, curve_min, curve_max = model_step(self.net,
+                                                                                  self.cls_criterion,
+                                                                                  self.curve_criterion,
+                                                                                  batch)
         self.log('train_loss',
                  loss,
                  batch_size=batch['tokens'].shape[0],
@@ -238,13 +256,37 @@ class OrliSegmentationModel(L.LightningModule):
                  on_epoch=True,
                  prog_bar=True,
                  logger=True)
+        if self.global_step % CURVE_STATS_INTERVAL == 0:
+            print(f'Pred curve stats: mean={curve_mean.item():.6f} '
+                  f'min={curve_min.item():.6f} max={curve_max.item():.6f}')
+            self.log('pred_curve_mean',
+                     curve_mean,
+                     batch_size=batch['tokens'].shape[0],
+                     on_step=True,
+                     on_epoch=False,
+                     prog_bar=False,
+                     logger=True)
+            self.log('pred_curve_min',
+                     curve_min,
+                     batch_size=batch['tokens'].shape[0],
+                     on_step=True,
+                     on_epoch=False,
+                     prog_bar=False,
+                     logger=True)
+            self.log('pred_curve_max',
+                     curve_max,
+                     batch_size=batch['tokens'].shape[0],
+                     on_step=True,
+                     on_epoch=False,
+                     prog_bar=False,
+                     logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss, cls_loss, curve_loss = model_step(self.net,
-                                                self.cls_criterion,
-                                                self.curve_criterion,
-                                                batch)
+        loss, cls_loss, curve_loss, curve_mean, curve_min, curve_max = model_step(self.net,
+                                                                                  self.cls_criterion,
+                                                                                  self.curve_criterion,
+                                                                                  batch)
         self.val_mean.update(loss)
         self.log('val_cls_loss',
                  cls_loss,
@@ -360,10 +402,22 @@ class OrliSegmentationModel(L.LightningModule):
                 'initial_lr': encoder_lr,  # Store for warmup
             })
 
-        # Everything else (decoder, adapter, regressor) - full LR
+        regressor_params = list(self.net.nn['regressor'].parameters())
+        regressor_lr = self.hparams.config.lrate * 5.0
+        if any(p.requires_grad for p in regressor_params):
+            param_groups.append({
+                'params': [p for p in regressor_params if p.requires_grad],
+                'lr': regressor_lr,
+                'initial_lr': regressor_lr,  # Store for warmup
+            })
+
+        # Everything else (decoder + adapter) - full LR
         encoder_param_ids = {id(p) for p in encoder_params}
+        regressor_param_ids = {id(p) for p in regressor_params}
         other_params = [p for p in self.net.parameters()
-                        if id(p) not in encoder_param_ids and p.requires_grad]
+                        if id(p) not in encoder_param_ids
+                        and id(p) not in regressor_param_ids
+                        and p.requires_grad]
         if other_params:
             param_groups.append({
                 'params': other_params,
