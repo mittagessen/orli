@@ -221,6 +221,13 @@ class OrliSegmentationModel(L.LightningModule):
                                                 self.cls_criterion,
                                                 self.curve_criterion,
                                                 batch)
+        # Handle NaN/Inf losses in DDP by replacing with zero loss
+        # This ensures all processes participate in gradient sync while
+        # preventing NaN gradients from corrupting the model
+        if torch.isnan(loss) or torch.isinf(loss):
+            logger.warning(f'NaN/Inf loss detected at batch {batch_idx}, replacing with zero loss')
+            # Create zero loss connected to graph via output projection weights
+            loss = 0.0 * sum(p.sum() for p in self.net.parameters() if p.requires_grad)
         self.log('train_loss',
                  loss,
                  batch_size=batch['tokens'].shape[0],
