@@ -48,7 +48,7 @@ class CurveTokenEmbedding(nn.Module):
                  token_dim: int,
                  curve_dim: int,
                  embed_dim: int,
-                 num_curve_freqs: int = 4):
+                 num_curve_freqs: int = 0):
         super().__init__()
         self.token_dim = token_dim
         self.curve_dim = curve_dim
