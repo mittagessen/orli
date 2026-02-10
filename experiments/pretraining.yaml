@@ -10,6 +10,7 @@ train:
     - /home/bkiessling/orli_overfit_val.lst
   # directory to save checkpoints in
   checkpoint_path: /home/bkiessling/experiments/base_orli
+  image_size: [1280, 960]
   # base configuration of training epochs and LR schedule
   optimizer: AdamW
   epochs: 24
