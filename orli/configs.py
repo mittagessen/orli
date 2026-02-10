@@ -1,3 +1,5 @@
+import torch.serialization
+
 from kraken.configs import TrainingConfig, SegmentationTrainingDataConfig, SegmentationInferenceConfig
 
 from importlib.resources import files
@@ -49,3 +51,17 @@ class OrliSegmentationInferenceConfig(SegmentationInferenceConfig):
         self.max_predicted_lines = kwargs.pop('max_predicted_lines', 768)
 
         super().__init__(**kwargs)
+
+
+class OrliSegmentationTestConfig(OrliSegmentationInferenceConfig):
+    """
+    Configuration for Orli segmentation model testing.
+    """
+    def __init__(self, **kwargs):
+        self.tolerance = kwargs.pop('tolerance', 10.0)
+        self.match_threshold = kwargs.pop('match_threshold', 0.5)
+
+        super().__init__(**kwargs)
+
+
+torch.serialization.add_safe_globals([OrliSegmentationTrainingConfig, OrliSegmentationTrainingConfig])
