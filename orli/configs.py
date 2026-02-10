@@ -1,4 +1,4 @@
-from kraken.configs import TrainingConfig, SegmentationTrainingDataConfig
+from kraken.configs import TrainingConfig, SegmentationTrainingDataConfig, SegmentationInferenceConfig
 
 from importlib.resources import files
 
@@ -38,4 +38,14 @@ class OrliSegmentationTrainingDataConfig(SegmentationTrainingDataConfig):
         kwargs['region_class_mapping'] = {}  # no support for region detection
         kwargs.setdefault('batch_size', 8)
         kwargs.setdefault('format_type', 'binary')
+        super().__init__(**kwargs)
+
+
+class OrliSegmentationInferenceConfig(SegmentationInferenceConfig):
+    """
+    Base data configuration for a Orli segmentation model.
+    """
+    def __init__(self, **kwargs):
+        self.max_predicted_lines = kwargs.pop('max_predicted_lines', 768)
+
         super().__init__(**kwargs)

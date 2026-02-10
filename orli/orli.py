@@ -25,9 +25,15 @@ from lightning.fabric import Fabric
 from typing import Optional, Any, Union
 from collections.abc import Generator
 
+from orli.configs import OrliSegmentationInferenceConfig
 from orli.fusion import baseline_decoder, OrliAdapter, CurveRegressionHead
+from orli.dataset import get_default_transforms
+from orli.modules.bezier import sample_bezier_curve
 
 from kraken.models import BaseModel
+from kraken.containers import Segmentation, BaselineLine
+
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +213,7 @@ class OrliModel(nn.Module, BaseModel):
         encoder_hidden_states = self.nn['encoder'](encoder_input)
         return self.nn['adapter'](encoder_hidden_states)
 
-    def prepare_for_inference(self, config: 'Config'):
+    def prepare_for_inference(self, config: OrliSegmentationInferenceConfig):
         """
         Configures the model for inference.
         """
@@ -216,19 +222,7 @@ class OrliModel(nn.Module, BaseModel):
 
         self.eval()
         self._inf_config = config
-
-        self._max_generated_tokens = 768
-        self._max_encoder_seq_len = 56800
-
-        # set up caches
-        self.setup_caches(batch_size=self._inf_config.batch_size,
-                          encoder_max_seq_len=max_encoder_seq_len,
-                          decoder_max_seq_len=self._max_generated_tokens,
-                          dtype=next(self.encoder.parameters()).dtype)
-
-        self.m_dtype = next(self.parameters()).dtype
-
-        # create batch size number of BOS tokens
+        self._batch_size = self._inf_config.batch_size
 
         self._fabric = Fabric(accelerator=self._inf_config.accelerator,
                               devices=self._inf_config.device,
@@ -237,12 +231,25 @@ class OrliModel(nn.Module, BaseModel):
         self.nn = self._fabric._precision.convert_module(self.nn)
         self.nn = self._fabric.to_device(self.nn)
 
-        self._prompt = self._fabric.to_device(F.one_hot(self.bos_id, num_classes=12).unsqueeze(0).repeat(self._inf_config.batch_size, 1, 1))
+        self.m_dtype = next(self.parameters()).dtype
+
+        self._max_encoder_seq_len = sum(h * w for h, w in self.nn['adapter'].output_sizes)
+
+        # set up caches
+        self.setup_caches(batch_size=self._batch_size,
+                          encoder_max_seq_len=self._max_encoder_seq_len,
+                          decoder_max_seq_len=self._inf_config.max_predicted_lines,
+                          dtype=self.m_dtype)
+
+        bos = torch.zeros(12, dtype=self.m_dtype)
+        bos[self.bos_id] = 1.0
+        self._prompt = self._fabric.to_device(bos.unsqueeze(0).unsqueeze(0).repeat(self._batch_size, 1, 1))
+
         # generate a regular causal mask
-        self._masks = self._fabric.to_device(torch.tril(torch.ones(self._max_generated_tokens,
-                                                                   self._max_generated_tokens,
+        self._masks = self._fabric.to_device(torch.tril(torch.ones(self._inf_config.max_predicted_lines,
+                                                                   self._inf_config.max_predicted_lines,
                                                                    dtype=torch.bool).unsqueeze(0)))
-        self._input_pos = self._fabric.to_device(torch.arange(0, self._max_generated_tokens).unsqueeze(0))
+        self._input_pos = self._fabric.to_device(torch.arange(0, self._inf_config.max_predicted_lines).unsqueeze(0))
 
         self.im_transforms = get_default_transforms(self.user_metadata['image_size'], dtype=self.m_dtype)
 
@@ -250,9 +257,39 @@ class OrliModel(nn.Module, BaseModel):
 
     @torch.inference_mode()
     def predict(self, im: 'Image.Image') -> 'Segmentation':
+        if not self.ready_for_generation:
+            raise RuntimeError('Model must be prepared for inference first. Call prepare_for_inference().')
+
+        if self.caches_are_setup():
+            self.reset_caches()
+
         with self._fabric.init_tensor():
             image_input = self.im_transforms(im).unsqueeze(0)
-            return self.predict_curves(image_input)
+        image_input = self._fabric.to_device(image_input)
+
+        curves = self.predict_curves(image_input)
+        if curves.dim() == 3:
+            curves = curves[0]
+        non_empty = curves.abs().sum(dim=-1) > 0
+        curves = curves[non_empty]
+
+        if curves.numel():
+            curve_scale = torch.tensor((im.width, im.height) * 4, dtype=curves.dtype, device=curves.device)
+            curves = curves * curve_scale
+
+        lines = []
+        for line in sample_bezier_curve(curves).cpu():
+            baseline = torch.round(line).to(torch.int64).tolist()
+            baseline = tuple(map(tuple, baseline))
+            lines.append(BaselineLine(id=f'_{uuid.uuid4()}',
+                                      baseline=baseline,
+                                      tags={'type': [{'type': 'default'}]}))
+
+        return Segmentation(type='baselines',
+                            imagename=getattr(im, 'filename', '') or '',
+                            script_detection=False,
+                            text_direction=self._inf_config.text_direction,
+                            lines=lines)
 
     @torch.inference_mode()
     def predict_curves(self,
@@ -305,7 +342,7 @@ class OrliModel(nn.Module, BaseModel):
         # mask used for setting all values from EOS token to pad_id in output sequences.
         eos_token_mask = torch.ones(self._batch_size, 0, dtype=torch.int32, device=curves.device)
 
-        for _ in range(self._max_generated_tokens - 1):
+        for _ in range(self._inf_config.max_predicted_lines - 1):
             # update eos_token_mask if an EOS token was emitted in a previous step
             eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
 

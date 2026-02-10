@@ -37,6 +37,54 @@ logger = logging.getLogger(__name__)
 CURVE_STATS_INTERVAL = 200
 
 
+def _log_nan_loss_details(stage, batch_idx, loss, cls_loss, curve_loss, batch, global_step=None):
+    """Logs extra batch details to help diagnose NaN/Inf losses."""
+    with torch.no_grad():
+        tokens = batch.get('tokens')
+        curves = batch.get('curves')
+        image = batch.get('image')
+
+        token_valid = tokens[..., 0] != -1
+        curve_valid = curves[..., 0] != -1
+
+        token_counts = token_valid.sum(dim=1).detach().cpu().tolist()
+        curve_counts = curve_valid.sum(dim=1).detach().cpu().tolist()
+
+        line_counts = [max(0, c - 2) for c in token_counts]
+        token_target_counts = [max(0, c - 1) for c in token_counts]
+        curve_target_counts = [max(0, c - 1) for c in curve_counts]
+
+        total_lines = sum(line_counts)
+        total_token_targets = sum(token_target_counts)
+        total_curve_targets = sum(curve_target_counts)
+
+        valid_curve_mask = curves[..., 0] != -1
+        valid_curves = curves[valid_curve_mask]
+        valid_curve_rows = int(valid_curve_mask.sum().item())
+        if valid_curves.numel():
+            curve_min = valid_curves.min().item()
+            curve_max = valid_curves.max().item()
+            curves_in_sigmoid = (valid_curves >= 0).all().item() and (valid_curves <= 1).all().item()
+        else:
+            curve_min = float('nan')
+            curve_max = float('nan')
+            curves_in_sigmoid = False
+
+        step_info = f', global_step={global_step}' if global_step is not None else ''
+        logger.warning(
+            f'{stage} NaN/Inf loss detected at batch {batch_idx}{step_info}. '
+            f'loss={loss.item():.6g} cls_loss={cls_loss.item():.6g} curve_loss={curve_loss.item():.6g} '
+            f'batch_size={tokens.shape[0]} '
+            f'tokens_shape={tuple(tokens.shape)} curves_shape={tuple(curves.shape)} '
+            f'image_shape={tuple(image.shape) if image is not None else None} '
+            f'line_counts={line_counts} total_lines={total_lines} '
+            f'token_targets_total={total_token_targets} curve_targets_total={total_curve_targets} '
+            f'valid_curve_rows={valid_curve_rows} '
+            f'curve_min={curve_min:.6g} curve_max={curve_max:.6g} '
+            f'curves_in_sigmoid={curves_in_sigmoid}'
+        )
+
+
 if TYPE_CHECKING:
     from kraken.models import BaseModel
     from os import PathLike
@@ -225,28 +273,28 @@ class OrliSegmentationModel(L.LightningModule):
         # This ensures all processes participate in gradient sync while
         # preventing NaN gradients from corrupting the model
         if torch.isnan(loss) or torch.isinf(loss):
-            logger.warning(f'NaN/Inf loss detected at batch {batch_idx}, replacing with zero loss')
+            _log_nan_loss_details('train', batch_idx, loss, cls_loss, curve_loss, batch, self.global_step)
             # Create zero loss connected to graph via output projection weights
             loss = 0.0 * sum(p.sum() for p in self.net.parameters() if p.requires_grad)
         self.log('train_loss',
                  loss,
                  batch_size=batch['tokens'].shape[0],
                  on_step=True,
-                 on_epoch=True,
+                 on_epoch=False,
                  prog_bar=True,
                  logger=True)
         self.log('train_cls_loss',
                  cls_loss,
                  batch_size=batch['tokens'].shape[0],
                  on_step=True,
-                 on_epoch=True,
+                 on_epoch=False,
                  prog_bar=True,
                  logger=True)
         self.log('train_curve_loss',
                  curve_loss,
                  batch_size=batch['tokens'].shape[0],
                  on_step=True,
-                 on_epoch=True,
+                 on_epoch=False,
                  prog_bar=True,
                  logger=True)
         return loss
@@ -256,6 +304,8 @@ class OrliSegmentationModel(L.LightningModule):
                                                 self.cls_criterion,
                                                 self.curve_criterion,
                                                 batch)
+        if torch.isnan(loss) or torch.isinf(loss):
+            _log_nan_loss_details('val', batch_idx, loss, cls_loss, curve_loss, batch, self.global_step)
         self.val_mean.update(loss)
         self.log('val_cls_loss',
                  cls_loss,

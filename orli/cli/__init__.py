@@ -10,6 +10,7 @@ from kraken.configs import Config, TrainingDataConfig
 from orli.configs import OrliSegmentationTrainingConfig, OrliSegmentationTrainingDataConfig
 
 from .train import train
+from .test import test
 from .util import _load_config, to_ptl_device
 
 
@@ -87,6 +88,7 @@ def cli(ctx, **kwargs):
 
 
 cli.add_command(train)
+cli.add_command(test)
 
 if __name__ == '__main__':
     cli()
