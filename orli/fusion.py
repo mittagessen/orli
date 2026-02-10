@@ -41,27 +41,48 @@ __all__ = ['baseline_decoder', 'CurveRegressionHead']
 
 class CurveTokenEmbedding(nn.Module):
     """
-    Separate embeddings for token classes and curve coordinates.
+    Separate embeddings for token classes and curve coordinates, with optional
+    Fourier features for the curve input.
     """
     def __init__(self,
                  token_dim: int,
                  curve_dim: int,
                  embed_dim: int,
-                 *args,
-                 **kwargs):
+                 num_curve_freqs: int = 0):
         super().__init__()
         self.token_dim = token_dim
         self.curve_dim = curve_dim
         self.embed_dim = embed_dim
+        self.num_curve_freqs = num_curve_freqs
 
+        curve_in_dim = curve_dim * (1 + 2 * num_curve_freqs) if num_curve_freqs > 0 else curve_dim
         self.tok_proj = nn.Linear(token_dim, embed_dim, bias=False)
-        self.curve_proj = nn.Linear(curve_dim, embed_dim, bias=False)
+        self.curve_proj = nn.Linear(curve_in_dim, embed_dim, bias=False)
+
+        if num_curve_freqs > 0:
+            freqs = 2 ** torch.arange(num_curve_freqs, dtype=torch.float32)
+            self.register_buffer('curve_freqs', freqs, persistent=False)
+        else:
+            self.curve_freqs = None
+
+    def _curve_features(self, curves: torch.Tensor) -> torch.Tensor:
+        if self.num_curve_freqs <= 0:
+            return curves
+        freqs = self.curve_freqs.to(dtype=curves.dtype, device=curves.device)
+        # [b, s, curve_dim, num_freqs]
+        scaled = curves.unsqueeze(-1) * (2.0 * math.pi * freqs)
+        sin = torch.sin(scaled)
+        cos = torch.cos(scaled)
+        sin = sin.flatten(start_dim=-2)
+        cos = cos.flatten(start_dim=-2)
+        return torch.cat([curves, sin, cos], dim=-1)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         # tokens shape: [b, s, token_dim + curve_dim]
         tok = tokens[..., :self.token_dim]
         curves = tokens[..., self.token_dim:self.token_dim + self.curve_dim]
-        return self.tok_proj(tok) + self.curve_proj(curve)
+        curve_feat = self._curve_features(curves)
+        return self.tok_proj(tok) + self.curve_proj(curve_feat)
 
 
 def baseline_decoder(vocab_size: int = 12,
@@ -183,11 +204,10 @@ def baseline_decoder(vocab_size: int = 12,
         )
         layers.append(FusionLayer(layer=decoder_layer, fusion_layer=xattn_layer))
 
-    curve_dim = 8
-    token_dim = config['vocab_size'] - curve_dim
-    if config['vocab_size'] < 12:
-        raise ValueError(f'vocab_size ({config["vocab_size"]}) must be >= 12.')
-
+    token_dim = 4
+    curve_dim = config['vocab_size'] - token_dim
+    if curve_dim <= 0:
+        raise ValueError(f'vocab_size ({config["vocab_size"]}) must be > token_dim ({token_dim}).')
     line_embeddings = CurveTokenEmbedding(token_dim=token_dim,
                                           curve_dim=curve_dim,
                                           embed_dim=config['embed_dim'],
