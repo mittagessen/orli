@@ -31,7 +31,10 @@ from kraken.models import create_model
 from orli.modules.bezier import sample_bezier_curve
 from orli.dataset import (get_default_transforms, BaselineSegmentationDataset,
                           collate_curves, _validation_worker_init_fn)
-from orli.configs import OrliSegmentationTrainingConfig, OrliSegmentationTrainingDataConfig
+from orli.configs import (OrliSegmentationTrainingConfig,
+                          OrliSegmentationTrainingDataConfig,
+                          OrliSegmentationTestConfig)
+from orli.metrics import evaluate_page, aggregate_metrics
 
 logger = logging.getLogger(__name__)
 CURVE_STATS_INTERVAL = 200
@@ -260,6 +263,11 @@ class OrliSegmentationModel(L.LightningModule):
         self.val_mean = MeanMetric()
         self.cls_criterion = torch.nn.CrossEntropyLoss(reduction='sum')
         self.curve_criterion = torch.nn.L1Loss(reduction='sum')
+        self.test_tolerance = 10.0
+        self.test_match_threshold = 0.5
+        self.test_results = {}
+        self._test_page_metrics = []
+        self._test_config = None
 
     def forward(self, x):
         return self.model(pixel_values=x)
@@ -331,6 +339,53 @@ class OrliSegmentationModel(L.LightningModule):
             self.log('global_step', self.global_step, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
         self.val_mean.reset()
 
+    def configure_test(self, test_config: OrliSegmentationTestConfig):
+        self._test_config = test_config
+        self.test_tolerance = test_config.tolerance
+        self.test_match_threshold = test_config.match_threshold
+
+    def on_test_start(self):
+        if self._test_config is None:
+            raise RuntimeError('Test configuration missing. Call configure_test() before running tests.')
+        if self.net is None:
+            raise RuntimeError('Model is not initialized.')
+        self._test_page_metrics = []
+        self.test_results = {}
+        self.net.prepare_for_inference(self._test_config)
+
+    @torch.no_grad()
+    def test_step(self, batch, batch_idx):
+        images = batch['image']
+        pred_curves = self.net.predict_curves(images)
+        if pred_curves.dim() == 2:
+            pred_curves = pred_curves.unsqueeze(0)
+
+        image_size = (images.shape[-1], images.shape[-2])
+
+        for idx in range(images.shape[0]):
+            pred = pred_curves[idx]
+            pred = pred[pred.abs().sum(dim=-1) > 0]
+            pred = pred.cpu().float()
+
+            gt = batch['curves'][idx]
+            if gt.shape[0] > 0:
+                gt = gt[1:]
+            gt = gt[gt[..., 0] != -1]
+            gt = gt.cpu().float()
+
+            metrics = evaluate_page(pred_curves=pred,
+                                    gt_curves=gt,
+                                    image_size=image_size,
+                                    tol=self.test_tolerance,
+                                    match_threshold=self.test_match_threshold)
+            self._test_page_metrics.append(metrics)
+
+    def on_test_epoch_end(self):
+        if not self._test_page_metrics:
+            self.test_results = {}
+            return
+        self.test_results = aggregate_metrics(self._test_page_metrics)
+
     def setup(self, stage: Optional[str] = None):
         logger.info('Creating segmentation model')
 
@@ -386,10 +441,16 @@ class OrliSegmentationModel(L.LightningModule):
         Initializes the module from a model weights file.
         """
         from kraken.models import load_models
+        from orli.orli import OrliModel
         models = load_models(path, tasks=['segmentation'])
-        if len(models) != 1:
-            raise ValueError(f'Found {len(models)} segmentation models in model file.')
-        return cls(config=config, model=models[0])
+        model = None
+        for candidate in models:
+            if isinstance(candidate, OrliModel):
+                model = candidate
+                break
+        if model is None:
+            raise ValueError('No OrliModel found in weights file.')
+        return cls(config=config, model=model)
 
     def configure_callbacks(self):
         callbacks = []
