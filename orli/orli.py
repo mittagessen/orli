@@ -63,9 +63,8 @@ class OrliModel(nn.Module, BaseModel):
         if (image_size := kwargs.get('image_size', None)) is None:
             raise ValueError('image_size argument is missing in args.')
 
-        anchors_path = kwargs.pop('anchors_path', None)
-        if not anchors_path:
-            raise ValueError('anchors_path argument is missing in args.')
+        if (anchors := kwargs.get('anchors', None)) is None:
+            raise ValueError('anchors argument is missing in args.')
 
         self.user_metadata: dict[str, Any] = {'accuracy': [],
                                               'metrics': []}
@@ -92,7 +91,7 @@ class OrliModel(nn.Module, BaseModel):
 
         curve_reg = CurveRegressionHead(embed_dim=decoder_model.tok_embeddings.embed_dim,
                                         num_iterations=len(decoder_model.output_hidden_states) + 1,
-                                        anchors=anchors_path)
+                                        anchors=anchors)
 
         self.nn = nn.ModuleDict({'encoder': encoder_model,
                                  'decoder': decoder_model,

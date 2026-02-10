@@ -16,7 +16,7 @@
 """Llama vision fusion model"""
 
 import logging
-from typing import Optional, Union, TYPE_CHECKING
+from typing import Optional
 
 import json
 import math
@@ -30,9 +30,6 @@ from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                           Llama3ScaledRoPE, llama3_mlp,
                           PositionEmbeddingRandom)
 from orli.modules.transformer import _get_clones
-
-if TYPE_CHECKING:
-    from os import PathLike
 
 logger = logging.getLogger(__name__)
 
@@ -331,14 +328,14 @@ class CurveRegressionHead(nn.Module):
     """
 
     def __init__(self,
-                 anchors: Union[str, 'PathLike'],
+                 anchors: torch.Tensor,
                  embed_dim: int = 576,
                  num_cls: int = 4,
                  num_layers: int = 3,
                  num_iterations: int = 4):
         super().__init__()
         reg_proj = nn.Sequential()
-        self.register_buffer('curve_anchors', torch.load(anchors, map_location='cpu').clamp(1e-5, 1 - 1e-5))
+        self.register_buffer('curve_anchors', anchors.clamp(1e-5, 1 - 1e-5))
 
         self.norms = nn.ModuleList([RMSNorm(embed_dim) for _ in range(num_iterations)])
 

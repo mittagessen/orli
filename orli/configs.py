@@ -1,3 +1,4 @@
+import torch
 import torch.serialization
 
 from kraken.configs import TrainingConfig, SegmentationTrainingDataConfig, SegmentationInferenceConfig
@@ -13,7 +14,7 @@ class OrliSegmentationTrainingConfig(TrainingConfig):
     """
     def __init__(self, **kwargs):
         self.freeze_encoder = kwargs.pop('freeze_encoder', False)
-        self.anchors_path = kwargs.pop('anchors_path', files('orli.assets').joinpath('anchors.pt'))
+        self.anchors = kwargs.pop('anchors', torch.load(files('orli.assets').joinpath('anchors.pt'), map_location='cpu'))
 
         kwargs.setdefault('quit', 'fixed')
         kwargs.setdefault('epochs', 16)

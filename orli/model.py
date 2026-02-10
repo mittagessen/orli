@@ -393,7 +393,7 @@ class OrliSegmentationModel(L.LightningModule):
             if self.net is None:
                 self.net = create_model('OrliModel',
                                         image_size=self.trainer.datamodule.hparams.data_config.image_size,
-                                        anchors_path=self.hparams.config.anchors_path)
+                                        anchors=self.hparams.config.anchors)
 
             if self.hparams.config.freeze_encoder:
                 for param in self.net.encoder.parameters():
@@ -419,19 +419,7 @@ class OrliSegmentationModel(L.LightningModule):
         data_config = checkpoint['datamodule_hyper_parameters']['data_config']
         self.net = create_model('OrliModel',
                                 image_size=data_config.image_size,
-                                anchors_path=checkpoint['_module_config'].anchors_path)
-
-    @classmethod
-    def load_from_repo(cls,
-                       id: str,
-                       config: OrliSegmentationTrainingConfig):
-        """
-        Loads weights from HTRMoPo.
-        """
-        from htrmopo import get_model
-
-        model_path = get_model(id) / 'model.safetensors'
-        return cls.load_from_weights(path=model_path, config=config)
+                                anchors=checkpoint['_module_config'].anchors)
 
     @classmethod
     def load_from_weights(cls,
