@@ -19,8 +19,6 @@ class OrliSegmentationTrainingConfig(TrainingConfig):
     def __init__(self, **kwargs):
         self.freeze_encoder = kwargs.pop('freeze_encoder', False)
         anchors = kwargs.pop('anchors', _default_anchors)
-        if isinstance(anchors, torch.Tensor):
-            anchors = tuple(tuple(row.tolist()) for row in anchors)
         self.anchors = anchors
         self.fourier_features = kwargs.pop('fourier_features', True)
         self.logit_refinement = kwargs.pop('logit_refinement', True)

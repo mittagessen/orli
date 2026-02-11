@@ -193,7 +193,7 @@ def train(ctx, **kwargs):
     m_config = OrliSegmentationTrainingConfig(**params)
 
     if resume:
-        data_module = OrliSegmentationDataModule.load_from_checkpoint(resume)
+        data_module = OrliSegmentationDataModule.load_from_checkpoint(resume, weights_only=False)
     else:
         data_module = OrliSegmentationDataModule(dm_config)
 
@@ -223,7 +223,7 @@ def train(ctx, **kwargs):
                 model = OrliSegmentationModel.load_from_weights(load, config=m_config)
         elif resume:
             message(f'Resuming from checkpoint {resume}.')
-            model = OrliSegmentationModel.load_from_checkpoint(resume)
+            model = OrliSegmentationModel.load_from_checkpoint(resume, weights_only=False)
         else:
             message('Initializing new model.')
             model = OrliSegmentationModel(m_config)
@@ -236,7 +236,7 @@ def train(ctx, **kwargs):
 
     with threadpool_limits(limits=ctx.meta['num_threads']):
         if resume:
-            trainer.fit(model, data_module, ckpt_path=resume)
+            trainer.fit(model, data_module, ckpt_path=resume, weights_only=False)
         else:
             trainer.fit(model, data_module)
 
