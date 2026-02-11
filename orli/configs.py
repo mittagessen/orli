@@ -1,9 +1,13 @@
+import json
 import torch
 import torch.serialization
 
 from kraken.configs import TrainingConfig, SegmentationTrainingDataConfig, SegmentationInferenceConfig
 
 from importlib.resources import files
+
+with files('orli.assets').joinpath('anchors.json').open('r') as _fp:
+    _default_anchors = tuple(tuple(row) for row in json.load(_fp))
 
 
 class OrliSegmentationTrainingConfig(TrainingConfig):
@@ -14,7 +18,12 @@ class OrliSegmentationTrainingConfig(TrainingConfig):
     """
     def __init__(self, **kwargs):
         self.freeze_encoder = kwargs.pop('freeze_encoder', False)
-        self.anchors = kwargs.pop('anchors', torch.load(files('orli.assets').joinpath('anchors.pt'), map_location='cpu'))
+        anchors = kwargs.pop('anchors', _default_anchors)
+        if isinstance(anchors, torch.Tensor):
+            anchors = tuple(tuple(row.tolist()) for row in anchors)
+        self.anchors = anchors
+        self.fourier_features = kwargs.pop('fourier_features', True)
+        self.logit_refinement = kwargs.pop('logit_refinement', True)
 
         kwargs.setdefault('quit', 'fixed')
         kwargs.setdefault('epochs', 16)
@@ -50,6 +59,7 @@ class OrliSegmentationInferenceConfig(SegmentationInferenceConfig):
     """
     def __init__(self, **kwargs):
         self.max_predicted_lines = kwargs.pop('max_predicted_lines', 768)
+        self.polygonize = kwargs.pop('polygonize', False)
 
         super().__init__(**kwargs)
 

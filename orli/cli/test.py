@@ -23,18 +23,20 @@ import click
 
 @click.command('test')
 @click.pass_context
-@click.option('-l', '--load',
-              default=None,
+@click.option('-B', '--batch-size',
+              type=int,
               show_default=True,
+              help='Batch size for evaluation')
+@click.option('-m',
+              '--load',
+              type=click.Path(exists=True, readable=True),
               help='Path to safetensors or checkpoint file containing orli weights')
 @click.option('-t', '--tolerance',
               type=float,
-              default=10.0,
               show_default=True,
               help='Tolerance in pixels for baseline matching')
 @click.option('--match-threshold',
               type=float,
-              default=0.5,
               show_default=True,
               help='Minimum match score for ordering evaluation')
 @click.option('--compile/--no-compile',
@@ -46,20 +48,26 @@ import click
               default=False,
               show_default=True)
 @click.argument('test_data', nargs=-1, type=click.Path(exists=True, dir_okay=False))
-def test(ctx, load, tolerance, match_threshold,
-         compile, quantize, test_data):
+def test(ctx, **kwargs):
     """
     Evaluates a model on an Arrow test dataset.
 
     Computes baseline detection metrics (Precision, Recall, F1) and
     reading order metrics (Spearman footrule, Kendall tau).
     """
+    params = ctx.params.copy()
+    params.update(ctx.meta)
+
+    load = params.pop('load', None)
+    test_data = params.pop('test_data', [])
+
     import torch
 
     from lightning.pytorch import Trainer
     from threadpoolctl import threadpool_limits
     from rich.table import Table
     from rich.console import Console
+    from lightning.pytorch.callbacks import RichProgressBar
 
     from orli.configs import (OrliSegmentationTrainingConfig,
                               OrliSegmentationTrainingDataConfig,
@@ -72,24 +80,25 @@ def test(ctx, load, tolerance, match_threshold,
     if not test_data:
         raise click.UsageError('No test data was provided. Pass one or more Arrow files.')
 
-    if quantize:
-        ctx.meta['precision'] = 'bf16-true'
+    if params.get('quantize'):
+        params['precision'] = 'bf16-true'
 
     accelerator = ctx.meta['accelerator']
     devices = ctx.meta['devices']
 
     dm_config = OrliSegmentationTrainingDataConfig(test_data=list(test_data),
-                                                   num_workers=ctx.meta.get('num_workers'))
+                                                   **params)
+    m_config = OrliSegmentationTrainingConfig(**params)
+
     data_module = OrliSegmentationDataModule(dm_config)
-    model_config = OrliSegmentationTrainingConfig()
 
     load = str(load)
     if load.endswith('.ckpt'):
-        model = OrliSegmentationModel.load_from_checkpoint(load, config=model_config)
+        model = OrliSegmentationModel.load_from_checkpoint(load, config=m_config)
     else:
-        model = OrliSegmentationModel.load_from_weights(load, config=model_config)
+        model = OrliSegmentationModel.load_from_weights(load, config=m_config)
 
-    if compile:
+    if params.get('compile'):
         click.echo('Compiling model ', nl=False)
         try:
             model.net = torch.compile(model.net, mode='max-autotune')
@@ -97,7 +106,7 @@ def test(ctx, load, tolerance, match_threshold,
         except Exception:
             click.secho('\u2717', fg='red')
 
-    if quantize:
+    if params.get('quantize'):
         click.echo('Quantizing model ', nl=False)
         try:
             import torchao
@@ -106,24 +115,22 @@ def test(ctx, load, tolerance, match_threshold,
         except Exception:
             click.secho('\u2717', fg='red')
 
-    test_config = OrliSegmentationTestConfig(device=devices,
-                                             accelerator=accelerator,
-                                             precision=ctx.meta.get('precision'),
-                                             batch_size=dm_config.batch_size,
-                                             tolerance=tolerance,
-                                             match_threshold=match_threshold)
+    test_config = OrliSegmentationTestConfig(**params)
 
     model.configure_test(test_config)
 
+    cbs = [RichProgressBar(leave=True)]
+
     trainer = Trainer(accelerator=accelerator,
                       devices=devices,
-                      precision=ctx.meta.get('precision'),
-                      enable_progress_bar=False if ctx.meta.get('verbose') else True,
+                      precision=params['precision'],
+                      enable_progress_bar=True if not ctx.meta['verbose'] else False,
+                      deterministic=params['deterministic'],
                       enable_model_summary=False,
-                      logger=False,
+                      callbacks=cbs,
                       num_sanity_val_steps=0)
 
-    with threadpool_limits(limits=ctx.meta.get('num_threads')):
+    with threadpool_limits(limits=params['num_threads']):
         trainer.test(model, datamodule=data_module)
 
     results = model.test_results

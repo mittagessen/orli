@@ -12,11 +12,11 @@ from rich.progress import track
 def cli(num_anchors, files):
     """
     Computes `n` anchors from one or more binary dataset files and writes them
-    to `anchors.pt`.
+    to `anchors.json`.
     """
     if not files:
         raise click.UsageError('No dataset files given.')
-    import torch
+    import json
     import numpy as np
     import pyarrow as pa
 
@@ -39,10 +39,10 @@ def cli(num_anchors, files):
             lines.append(line['curve'])
     lines = np.array(lines)
     kmeans = KMeans(n_clusters=num_anchors).fit(lines)
-    anchors = torch.from_numpy(kmeans.cluster_centers_).float()
+    anchors = [tuple(float(v) for v in row) for row in kmeans.cluster_centers_]
     print(f'Anchors: {anchors}')
-    with open('anchors.pt', 'wb') as fp:
-        torch.save(anchors, fp)
+    with open('anchors.json', 'w') as fp:
+        json.dump(anchors, fp, indent=2)
 
 
 if __name__ == '__main__':

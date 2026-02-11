@@ -50,7 +50,7 @@ class OrliModel(nn.Module, BaseModel):
     bos_id: int = 1
     eos_id: int = 2
     user_metadata = {}
-    model_type = 'segmentation'
+    model_type = ['segmentation']
     _kraken_min_version = '6.0.0'
 
     def __init__(self, **kwargs):
@@ -87,11 +87,16 @@ class OrliModel(nn.Module, BaseModel):
                               encoder_sizes=[x[:2] for x in encoder_sizes],
                               decoder_embed_dim=576)
 
-        decoder_model = baseline_decoder(encoder_sizes=adapter.output_sizes)
+        fourier_features = kwargs.get('fourier_features', True)
+        logit_refinement = kwargs.get('logit_refinement', True)
+
+        decoder_model = baseline_decoder(encoder_sizes=adapter.output_sizes,
+                                         fourier_features=fourier_features)
 
         curve_reg = CurveRegressionHead(embed_dim=decoder_model.tok_embeddings.embed_dim,
                                         num_iterations=len(decoder_model.output_hidden_states) + 1,
-                                        anchors=anchors)
+                                        anchors=anchors,
+                                        logit_refinement=logit_refinement)
 
         self.nn = nn.ModuleDict({'encoder': encoder_model,
                                  'decoder': decoder_model,
@@ -259,9 +264,6 @@ class OrliModel(nn.Module, BaseModel):
         if not self.ready_for_generation:
             raise RuntimeError('Model must be prepared for inference first. Call prepare_for_inference().')
 
-        if self.caches_are_setup():
-            self.reset_caches()
-
         with self._fabric.init_tensor():
             image_input = self.im_transforms(im).unsqueeze(0)
         image_input = self._fabric.to_device(image_input)
@@ -276,13 +278,25 @@ class OrliModel(nn.Module, BaseModel):
             curve_scale = torch.tensor((im.width, im.height) * 4, dtype=curves.dtype, device=curves.device)
             curves = curves * curve_scale
 
+        sampled = sample_bezier_curve(curves).cpu()
+
         lines = []
-        for line in sample_bezier_curve(curves).cpu():
+        baselines = []
+        for line in sampled:
             baseline = torch.round(line).to(torch.int64).tolist()
             baseline = tuple(map(tuple, baseline))
+            baselines.append(baseline)
             lines.append(BaselineLine(id=f'_{uuid.uuid4()}',
                                       baseline=baseline,
                                       tags={'type': [{'type': 'default'}]}))
+
+        if self._inf_config.polygonize and lines:
+            from kraken.lib.segmentation import calculate_polygonal_environment
+            boundaries = calculate_polygonal_environment(im=im.convert('L'),
+                                                        baselines=[list(bl) for bl in baselines])
+            for line, boundary in zip(lines, boundaries):
+                if boundary is not None:
+                    line.boundary = boundary
 
         return Segmentation(type='baselines',
                             imagename=getattr(im, 'filename', '') or '',
@@ -308,6 +322,9 @@ class OrliModel(nn.Module, BaseModel):
             items will be a no-output.
         """
         logger.info('Computing encoder embeddings')
+
+        if self.caches_are_setup():
+            self.reset_caches()
 
         encoder_hidden_states = self.forward_encoder_embeddings(encoder_input)
 
@@ -349,8 +366,9 @@ class OrliModel(nn.Module, BaseModel):
             curr_masks = self._masks[:, curr_pos, None, :]
 
             # no need for encoder embeddings anymore as they're in the cache now
-            num_cls = logits['tokens'].shape[-1]
-            input_tok = F.one_hot(tokens.squeeze(-1), num_classes=num_cls).to(device=encoder_hidden_states.device)
+            # clamp anchor-specific LINE tokens back to generic LINE for input one-hot
+            input_token_cls = tokens.squeeze(-1).clamp(max=3)
+            input_tok = F.one_hot(input_token_cls, num_classes=4).to(device=encoder_hidden_states.device)
             logits = self.forward(tokens=torch.cat([input_tok.unsqueeze(1),
                                                     curves.unsqueeze(1)], dim=-1),
                                   mask=curr_masks,

@@ -94,6 +94,7 @@ def baseline_decoder(vocab_size: int = 12,
                      rope_base: int = 10000,
                      encoder_sizes: list[tuple[int, int]] = None,  # start of fusion parameters
                      pretrained: Optional[str] = None,
+                     fourier_features: bool = True,
                      **kwargs) -> TransformerDecoder:
     """
     Builds a decoder regressing baselines as cubic Bézier curves using
@@ -208,7 +209,7 @@ def baseline_decoder(vocab_size: int = 12,
     line_embeddings = CurveTokenEmbedding(token_dim=token_dim,
                                           curve_dim=curve_dim,
                                           embed_dim=config['embed_dim'],
-                                          num_curve_freqs=4)
+                                          num_curve_freqs=4 if fourier_features else 0)
 
     decoder = TransformerDecoder(tok_embeddings=line_embeddings,
                                  layers=layers,
@@ -328,14 +329,25 @@ class CurveRegressionHead(nn.Module):
     """
 
     def __init__(self,
-                 anchors: torch.Tensor,
+                 anchors: tuple[tuple[float, ...], ...],
                  embed_dim: int = 576,
-                 num_cls: int = 4,
                  num_layers: int = 3,
-                 num_iterations: int = 4):
+                 num_iterations: int = 4,
+                 logit_refinement: bool = True):
         super().__init__()
+        self.logit_refinement = logit_refinement
+        if isinstance(anchors, torch.Tensor):
+            anchors_t = anchors.float()
+        else:
+            anchors_t = torch.tensor(anchors, dtype=torch.float32)
+        self.num_anchors = anchors_t.shape[0]
+        num_cls = 3 + self.num_anchors
+
         reg_proj = nn.Sequential()
-        self.register_buffer('curve_anchors', anchors.clamp(1e-5, 1 - 1e-5))
+        if logit_refinement:
+            self.register_buffer('curve_anchors', anchors_t.clamp(1e-5, 1 - 1e-5))
+        else:
+            self.register_buffer('curve_anchors', anchors_t)
 
         self.norms = nn.ModuleList([RMSNorm(embed_dim) for _ in range(num_iterations)])
 
@@ -363,15 +375,26 @@ class CurveRegressionHead(nn.Module):
             ``[num_iterations, b, s, num_cls]``.
         """
         batch_size, seq_len, _ = xs[0].shape
-        # expand anchor to batch and sequence dimensions [1, 8] -> [b, s, 8]
-        _curves: list[torch.Tensor] = [self.curve_anchors.unsqueeze(0).expand(batch_size, seq_len, -1)]
+
+        # anchor selection: use first iteration's cls_proj to pick per-token anchor
+        if self.num_anchors > 1:
+            h0 = self.norms[0](xs[0])
+            anchor_logits = self.cls_projs[0](h0)           # [b, s, 3+N]
+            anchor_idx = anchor_logits[..., 3:].argmax(-1)   # [b, s]
+            init_curves = self.curve_anchors[anchor_idx]      # [b, s, 8]
+        else:
+            init_curves = self.curve_anchors.unsqueeze(0).expand(batch_size, seq_len, -1)
+
+        _curves: list[torch.Tensor] = [init_curves]
         _logits: list[torch.Tensor] = []
         for norm, cls_proj, reg_proj, layer in zip(self.norms, self.cls_projs, self.reg_projs, xs):
             curves = _curves[-1]
             layer = norm(layer)
             offsets = reg_proj(layer)
-            curves_logits = inverse_sigmoid(curves)
-            _curves.append(torch.sigmoid(curves_logits + offsets))
+            if self.logit_refinement:
+                _curves.append(torch.sigmoid(inverse_sigmoid(curves) + offsets))
+            else:
+                _curves.append(curves + offsets)
             _logits.append(cls_proj(layer))
 
         return {'curves': torch.stack(_curves[1:]),

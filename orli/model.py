@@ -126,18 +126,32 @@ def model_step(model,
     num_token_targets = valid_tokens_mask.sum().clamp_min(1)
     num_curve_targets = valid_curves_mask.sum().clamp_min(1)
 
+    # precompute target class indices, remapping LINE tokens for multi-anchor
+    target_cls_indices = target_tokens.argmax(dim=-1)  # [b, s]
+    num_cls = logits['tokens'].shape[-1]
+
+    if num_cls > 4:  # multi-anchor active
+        anchor_table = model.nn['regressor'].curve_anchors  # [num_anchors, 8]
+        valid_gt = target_curves[valid_curves_mask]           # [M, 8]
+        dists = (valid_gt.unsqueeze(1) - anchor_table.unsqueeze(0)).abs().sum(-1)  # [M, N]
+        nearest = dists.argmin(dim=-1)                        # [M]
+
+        full_anchor_idx = torch.zeros_like(target_cls_indices)
+        full_anchor_idx[valid_curves_mask] = nearest
+        line_mask = target_cls_indices == 3
+        target_cls_indices[line_mask] = 3 + full_anchor_idx[line_mask]
+
     for pred_curves, pred_tokens in zip(logits['curves'], logits['tokens']):
         # filter out ignored indices from predictions
         pred_tokens = pred_tokens[valid_tokens_mask]
         pred_curves = pred_curves[valid_curves_mask]
 
         # valid targets
-        batch_target_tokens = target_tokens[valid_tokens_mask]
+        batch_target_cls = target_cls_indices[valid_tokens_mask]
         batch_target_curves = target_curves[valid_curves_mask]
 
-        num_cls = pred_tokens.shape[-1]
         cls_loss = cls_criterion(pred_tokens.reshape(-1, num_cls),
-                                 batch_target_tokens.argmax(dim=-1).reshape(-1))
+                                 batch_target_cls.reshape(-1))
         cls_loss = cls_loss / num_token_targets
 
         # sample points from curves
@@ -255,7 +269,7 @@ class OrliSegmentationModel(L.LightningModule):
         if model:
             self.net = model
 
-            if self.net.model_type not in [None, 'segmentation']:
+            if 'segmentation' not in self.net.model_type:
                 raise ValueError(f'Model {model} is of type {self.net.model_type} while `segmentation` is expected.')
         else:
             self.net = None
@@ -393,7 +407,9 @@ class OrliSegmentationModel(L.LightningModule):
             if self.net is None:
                 self.net = create_model('OrliModel',
                                         image_size=self.trainer.datamodule.hparams.data_config.image_size,
-                                        anchors=self.hparams.config.anchors)
+                                        anchors=self.hparams.config.anchors,
+                                        fourier_features=self.hparams.config.fourier_features,
+                                        logit_refinement=self.hparams.config.logit_refinement)
 
             if self.hparams.config.freeze_encoder:
                 for param in self.net.encoder.parameters():
@@ -417,9 +433,12 @@ class OrliSegmentationModel(L.LightningModule):
             raise ValueError('Checkpoint is not an orli model.')
 
         data_config = checkpoint['datamodule_hyper_parameters']['data_config']
+        cfg = checkpoint['_module_config']
         self.net = create_model('OrliModel',
                                 image_size=data_config.image_size,
-                                anchors=checkpoint['_module_config'].anchors)
+                                anchors=cfg.anchors,
+                                fourier_features=getattr(cfg, 'fourier_features', True),
+                                logit_refinement=getattr(cfg, 'logit_refinement', True))
 
     @classmethod
     def load_from_weights(cls,

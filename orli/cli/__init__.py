@@ -7,7 +7,9 @@ from rich.logging import RichHandler
 from rich.traceback import install
 from kraken.registry import PRECISIONS
 from kraken.configs import Config, TrainingDataConfig
-from orli.configs import OrliSegmentationTrainingConfig, OrliSegmentationTrainingDataConfig
+from orli.configs import (OrliSegmentationTrainingConfig,
+                          OrliSegmentationTrainingDataConfig,
+                          OrliSegmentationTestConfig)
 
 from .train import train
 from .test import test
@@ -40,7 +42,8 @@ Image.MAX_IMAGE_PIXELS = 20000 ** 2
 @click.group(context_settings=dict(show_default=True,
                                    default_map={**Config().__dict__,
                                                 **TrainingDataConfig().__dict__,
-                                                'train': {**OrliSegmentationTrainingConfig().__dict__, **OrliSegmentationTrainingDataConfig().__dict__}}))
+                                                'train': {**OrliSegmentationTrainingConfig().__dict__, **OrliSegmentationTrainingDataConfig().__dict__},
+                                                'test': {**OrliSegmentationTrainingDataConfig().__dict__, **OrliSegmentationTestConfig().__dict__}}))
 @click.version_option()
 @click.pass_context
 @click.option('-v', '--verbose', default=0, count=True)
