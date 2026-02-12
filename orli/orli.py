@@ -49,7 +49,6 @@ class OrliModel(nn.Module, BaseModel):
     """
     bos_id: int = 1
     eos_id: int = 2
-    user_metadata = {}
     model_type = ['segmentation']
     _kraken_min_version = '6.0.0'
 
@@ -67,7 +66,7 @@ class OrliModel(nn.Module, BaseModel):
             raise ValueError('anchors argument is missing in args.')
 
         self.user_metadata: dict[str, Any] = {'accuracy': [],
-                                              'metrics': []}
+                                               'metrics': []}
         self.user_metadata.update(kwargs)
 
         logger.info('Creating segmentation model')
@@ -104,6 +103,14 @@ class OrliModel(nn.Module, BaseModel):
                                  'regressor': curve_reg})
 
         self.ready_for_generation = False
+
+    @property
+    def user_metadata(self) -> dict[str, Any]:
+        return self._user_metadata
+
+    @user_metadata.setter
+    def user_metadata(self, val: dict[str, Any]) -> None:
+        self._user_metadata = val
 
     def setup_caches(self,
                      batch_size: int,
@@ -293,7 +300,7 @@ class OrliModel(nn.Module, BaseModel):
         if self._inf_config.polygonize and lines:
             from kraken.lib.segmentation import calculate_polygonal_environment
             boundaries = calculate_polygonal_environment(im=im.convert('L'),
-                                                        baselines=[list(bl) for bl in baselines])
+                                                         baselines=[list(bl) for bl in baselines])
             for line, boundary in zip(lines, boundaries):
                 if boundary is not None:
                     line.boundary = boundary
@@ -305,8 +312,7 @@ class OrliModel(nn.Module, BaseModel):
                             lines=lines)
 
     @torch.inference_mode()
-    def predict_curves(self,
-                encoder_input: torch.FloatTensor) -> Generator[torch.Tensor, None, None]:
+    def predict_curves(self, encoder_input: torch.FloatTensor) -> Generator[torch.Tensor, None, None]:
         """
         Predicts Bézier curves and line classes.
 

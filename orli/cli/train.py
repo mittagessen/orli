@@ -160,6 +160,8 @@ def train(ctx, **kwargs):
     from lightning.pytorch import Trainer
     from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar
 
+    from kraken.train.utils import KrakenOnExceptionCheckpoint
+
     torch.set_float32_matmul_precision('high')
 
     # disable automatic partition when given evaluation set explicitly
@@ -181,13 +183,15 @@ def train(ctx, **kwargs):
         val_check_interval = {'val_check_interval': params['freq']}
 
     cbs = []
-    checkpoint_callback = ModelCheckpoint(dirpath=params.pop('checkpoint_path'),
+    checkpoint_dir = params.pop('checkpoint_path')
+    checkpoint_callback = ModelCheckpoint(dirpath=checkpoint_dir,
                                           save_top_k=10,
                                           monitor='val_metric',
                                           mode='min',
                                           auto_insert_metric_name=False,
                                           filename='checkpoint_{epoch:02d}-{val_metric:.4f}')
     cbs.append(checkpoint_callback)
+    cbs.append(KrakenOnExceptionCheckpoint(checkpoint_dir))
 
     dm_config = OrliSegmentationTrainingDataConfig(**params)
     m_config = OrliSegmentationTrainingConfig(**params)
