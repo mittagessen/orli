@@ -30,7 +30,7 @@ from orli.fusion import baseline_decoder, OrliAdapter, CurveRegressionHead
 from orli.dataset import get_default_transforms
 from orli.modules.bezier import sample_bezier_curve
 
-from kraken.models import BaseModel
+from kraken.models import SegmentationBaseModel
 from kraken.containers import Segmentation, BaselineLine
 
 import uuid
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 __all__ = ['OrliModel']
 
 
-class OrliModel(nn.Module, BaseModel):
+class OrliModel(nn.Module, SegmentationBaseModel):
     """
     The transformer segmentation fusion model.
 
