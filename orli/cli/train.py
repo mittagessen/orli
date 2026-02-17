@@ -123,6 +123,11 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               help='Sets the training data format.')
 @click.option('-is', '--image-size', type=(int, int), help='Network input image size.')
 @click.option('--augment/--no-augment', help='Enable image augmentation')
+@click.option('--logger',
+              'pl_logger',
+              type=click.Choice(['tensorboard', 'wandb']),
+              default=None,
+              help='Logger to use for training.')
 @click.argument('ground_truth', nargs=-1, callback=_expand_gt, type=click.Path(exists=False, dir_okay=False))
 @click.pass_context
 def train(ctx, **kwargs):
@@ -151,6 +156,12 @@ def train(ctx, **kwargs):
         except ImportError:
             raise click.BadOptionUsage('logger', 'tensorboard logger needs the `tensorboard` package installed.')
 
+    if params.get('pl_logger') == 'wandb':
+        try:
+            import wandb  # NOQA
+        except ImportError:
+            raise click.BadOptionUsage('logger', 'wandb logger needs the `wandb` package installed.')
+
     import torch
 
     from orli.configs import OrliSegmentationTrainingConfig, OrliSegmentationTrainingDataConfig
@@ -158,6 +169,7 @@ def train(ctx, **kwargs):
 
     from lightning.pytorch import Trainer
     from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar
+    from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 
     from kraken.models import convert_models
     from kraken.train.utils import KrakenOnExceptionCheckpoint
@@ -204,6 +216,14 @@ def train(ctx, **kwargs):
     if not params['verbose']:
         cbs.append(RichProgressBar(leave=True))
 
+    pl_logger = None
+    if params.get('pl_logger') == 'tensorboard':
+        pl_logger = TensorBoardLogger(save_dir=checkpoint_dir)
+    elif params.get('pl_logger') == 'wandb':
+        pl_logger = WandbLogger(project='orli',
+                                save_dir=checkpoint_dir,
+                                log_model=False)
+
     trainer = Trainer(accelerator=ctx.meta['accelerator'],
                       devices=ctx.meta['devices'],
                       precision=ctx.meta['precision'],
@@ -216,6 +236,7 @@ def train(ctx, **kwargs):
                       callbacks=cbs,
                       gradient_clip_val=params['gradient_clip_val'],
                       num_sanity_val_steps=0,
+                      logger=pl_logger if pl_logger else False,
                       **val_check_interval)
 
     with trainer.init_module(empty_init=False if (load or resume) else True):
