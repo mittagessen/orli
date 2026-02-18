@@ -165,6 +165,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                 encoder_input: Optional[torch.Tensor] = None,
                 encoder_hidden_states: Optional[torch.Tensor] = None,
                 encoder_curves: Optional[torch.Tensor] = None,
+                target_anchor_idx: Optional[torch.Tensor] = None,
                 encoder_mask: Optional[torch.Tensor] = None,
                 mask: Optional[torch.Tensor] = None,
                 input_pos: Optional[torch.Tensor] = None) -> Union[torch.Tensor, list[torch.Tensor]]:
@@ -176,6 +177,8 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                                    embeddings already added.
             encoder_curves: Optional curves to be embedded and added to encoder
                             embeddings.
+            target_anchor_idx: Optional per-token anchor assignments used during
+                               training to initialize multi-anchor regression.
             input_pos: Optional tensor which contains the position ids of each
                        token. During training, this is used to indicate the
                        positions of each token relative to its sample when
@@ -214,7 +217,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                                     encoder_input=encoder_hidden_states,
                                     encoder_mask=encoder_mask,
                                     input_pos=input_pos)
-        return self.nn['regressor'](output)
+        return self.nn['regressor'](output, target_anchor_idx=target_anchor_idx)
 
     def forward_encoder_embeddings(self, encoder_input):
         """

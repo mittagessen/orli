@@ -363,11 +363,16 @@ class CurveRegressionHead(nn.Module):
         self.reg_projs = _get_clones(reg_proj, num_iterations)
         self.cls_projs = _get_clones(cls_proj, num_iterations)
 
-    def forward(self, xs: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+    def forward(self,
+                xs: list[torch.Tensor],
+                target_anchor_idx: Optional[torch.Tensor] = None) -> dict[str, torch.Tensor]:
         """
         Args:
             xs: A list containing `num_iterations` tensors of shape
                 ``[b, s, d_e]`` where ``d_e`` is the decoder embedding dim.
+            target_anchor_idx: Optional tensor of shape ``[b, s]`` with
+                per-token anchor ids used for training-time anchor
+                initialization.
 
         Returns:
             A dictionary containing an output tensor with shape ``[num_iterations, b, s, 8]``
@@ -378,10 +383,13 @@ class CurveRegressionHead(nn.Module):
 
         # anchor selection: use first iteration's cls_proj to pick per-token anchor
         if self.num_anchors > 1:
-            h0 = self.norms[0](xs[0])
-            anchor_logits = self.cls_projs[0](h0)           # [b, s, 3+N]
-            anchor_idx = anchor_logits[..., 3:].argmax(-1)   # [b, s]
-            init_curves = self.curve_anchors[anchor_idx]      # [b, s, 8]
+            if target_anchor_idx is not None:
+                anchor_idx = target_anchor_idx.clamp(min=0, max=self.num_anchors - 1)
+            else:
+                h0 = self.norms[0](xs[0])
+                anchor_logits = self.cls_projs[0](h0)          # [b, s, 3+N]
+                anchor_idx = anchor_logits[..., 3:].argmax(-1)  # [b, s]
+            init_curves = self.curve_anchors[anchor_idx]  # [b, s, 8]
         else:
             init_curves = self.curve_anchors.unsqueeze(0).expand(batch_size, seq_len, -1)
 

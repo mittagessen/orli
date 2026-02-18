@@ -111,15 +111,6 @@ def model_step(model,
 
     target_tokens = torch.hstack((tokens[..., 1:, :], ignore_idxs_tokens))
     target_curves = torch.hstack((curves[..., 1:, :], ignore_idxs_curves))
-    # our tokens already contain BOS/EOS tokens so we just run it
-    # through the model after replacing ignored indices.
-    tokens.masked_fill_(tokens == -1.0, 0)
-    curves.masked_fill_(curves == -1.0, 0)
-
-    logits = model(tokens=torch.cat([tokens, curves], dim=-1), encoder_input=batch['image'])
-    losses = None
-    cls_losses = None
-    curve_losses = None
 
     valid_tokens_mask = target_tokens[..., 0] != -1
     valid_curves_mask = target_curves[..., 0] != -1
@@ -128,18 +119,30 @@ def model_step(model,
 
     # precompute target class indices, remapping LINE tokens for multi-anchor
     target_cls_indices = target_tokens.argmax(dim=-1)  # [b, s]
-    num_cls = logits['tokens'].shape[-1]
-
-    if num_cls > 4:  # multi-anchor active
+    target_anchor_idx = None
+    if model.nn['regressor'].num_anchors > 1:
         anchor_table = model.nn['regressor'].curve_anchors  # [num_anchors, 8]
-        valid_gt = target_curves[valid_curves_mask]           # [M, 8]
-        dists = (valid_gt.unsqueeze(1) - anchor_table.unsqueeze(0)).abs().sum(-1)  # [M, N]
-        nearest = dists.argmin(dim=-1)                        # [M]
-
-        full_anchor_idx = torch.zeros_like(target_cls_indices)
-        full_anchor_idx[valid_curves_mask] = nearest
+        valid_gt = target_curves[valid_curves_mask]  # [M, 8]
+        target_anchor_idx = torch.full_like(target_cls_indices, -1)
+        if valid_gt.numel():
+            dists = (valid_gt.unsqueeze(1) - anchor_table.unsqueeze(0)).abs().sum(-1)  # [M, N]
+            nearest = dists.argmin(dim=-1)  # [M]
+            target_anchor_idx[valid_curves_mask] = nearest
         line_mask = target_cls_indices == 3
-        target_cls_indices[line_mask] = 3 + full_anchor_idx[line_mask]
+        target_cls_indices[line_mask] = 3 + target_anchor_idx[line_mask].clamp(min=0)
+
+    # our tokens already contain BOS/EOS tokens so we just run it
+    # through the model after replacing ignored indices.
+    tokens.masked_fill_(tokens == -1.0, 0)
+    curves.masked_fill_(curves == -1.0, 0)
+
+    logits = model(tokens=torch.cat([tokens, curves], dim=-1),
+                   encoder_input=batch['image'],
+                   target_anchor_idx=target_anchor_idx)
+    losses = None
+    cls_losses = None
+    curve_losses = None
+    num_cls = logits['tokens'].shape[-1]
 
     for pred_curves, pred_tokens in zip(logits['curves'], logits['tokens']):
         # filter out ignored indices from predictions
