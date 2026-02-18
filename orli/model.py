@@ -185,7 +185,8 @@ class OrliSegmentationDataModule(L.LightningDataModule):
         self.save_hyperparameters()
         self.hparams.data_config.val_batch_size = data_config.batch_size if not data_config.val_batch_size else data_config.val_batch_size
 
-        im_transforms = get_default_transforms(image_size=data_config.image_size)
+        im_transforms = get_default_transforms(image_size=data_config.image_size,
+                                               normalize=False)
 
         if data_config.training_data and data_config.evaluation_data:
             self.train_set = BaselineSegmentationDataset(data_config.training_data,
@@ -232,30 +233,42 @@ class OrliSegmentationDataModule(L.LightningDataModule):
             self.hparams.data_config.region_class_mapping = dict(self.hparams.data_config.region_class_mapping)
 
     def train_dataloader(self):
+        loader_kwargs = {}
+        if self.hparams.data_config.num_workers > 0:
+            loader_kwargs['prefetch_factor'] = 4
         return DataLoader(self.train_set,
                           batch_size=self.hparams.data_config.batch_size,
                           num_workers=self.hparams.data_config.num_workers,
                           pin_memory=True,
                           shuffle=True,
-                          collate_fn=self.collator)
+                          collate_fn=self.collator,
+                          **loader_kwargs)
 
     def val_dataloader(self):
+        loader_kwargs = {}
+        if self.hparams.data_config.num_workers > 0:
+            loader_kwargs['prefetch_factor'] = 4
         return DataLoader(self.val_set,
                           shuffle=False,
-                          batch_size=self.hparams.data_config.batch_size,
+                          batch_size=self.hparams.data_config.val_batch_size,
                           num_workers=self.hparams.data_config.num_workers,
                           pin_memory=True,
                           worker_init_fn=_validation_worker_init_fn,
-                          collate_fn=self.collator)
+                          collate_fn=self.collator,
+                          **loader_kwargs)
 
     def test_dataloader(self):
+        loader_kwargs = {}
+        if self.hparams.data_config.num_workers > 0:
+            loader_kwargs['prefetch_factor'] = 4
         return DataLoader(self.test_set,
                           shuffle=False,
-                          batch_size=self.hparams.data_config.batch_size,
+                          batch_size=self.hparams.data_config.val_batch_size,
                           num_workers=self.hparams.data_config.num_workers,
                           pin_memory=True,
                           worker_init_fn=_validation_worker_init_fn,
-                          collate_fn=self.collator)
+                          collate_fn=self.collator,
+                          **loader_kwargs)
 
 
 class OrliSegmentationModel(L.LightningModule):
@@ -415,9 +428,9 @@ class OrliSegmentationModel(L.LightningModule):
                                         logit_refinement=self.hparams.config.logit_refinement)
 
             if self.hparams.config.freeze_encoder:
-                for param in self.net.encoder.parameters():
+                for param in self.net.nn['encoder'].parameters():
                     param.requires_grad = False
-                for param in self.net.adapter.parameters():
+                for param in self.net.nn['adapter'].parameters():
                     param.requires_grad = False
 
     def on_save_checkpoint(self, checkpoint):
@@ -479,7 +492,7 @@ class OrliSegmentationModel(L.LightningModule):
     # batch-wise learning rate warmup. In lr_scheduler_step() calls to the
     # scheduler are then only performed at the end of the epoch.
     def configure_optimizers(self):
-        # Selective learning rates: lower LR for pretrained encoder, full LR for decoder
+        # Selective learning rates: lower LR for pretrained encoder, full LR otherwise
         param_groups = []
 
         # Encoder (pretrained) - lower LR when unfrozen
@@ -493,7 +506,7 @@ class OrliSegmentationModel(L.LightningModule):
             })
 
         regressor_params = list(self.net.nn['regressor'].parameters())
-        regressor_lr = self.hparams.config.lrate * 5.0
+        regressor_lr = self.hparams.config.lrate
         if any(p.requires_grad for p in regressor_params):
             param_groups.append({
                 'params': [p for p in regressor_params if p.requires_grad],

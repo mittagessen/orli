@@ -45,12 +45,14 @@ logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = 20000 ** 2
 
 
-def get_default_transforms(image_size, dtype=torch.float32):
-    return v2.Compose([v2.Resize(image_size),
-                       v2.ToImage(),
-                       v2.ToDtype(dtype, scale=True),
-                       v2.Normalize(mean=(0.485, 0.456, 0.406),
-                                    std=(0.229, 0.224, 0.225))])
+def get_default_transforms(image_size, dtype=torch.float32, normalize: bool = True):
+    transforms = [v2.Resize(image_size),
+                  v2.ToImage(),
+                  v2.ToDtype(dtype, scale=True)]
+    if normalize:
+        transforms.append(v2.Normalize(mean=(0.485, 0.456, 0.406),
+                                       std=(0.229, 0.224, 0.225)))
+    return v2.Compose(transforms)
 
 
 def collate_curves(batch,
@@ -91,6 +93,7 @@ class BaselineSegmentationDataset(Dataset):
     def __init__(self,
                  files: Sequence[Union[str, 'PathLike']],
                  im_transforms=None,
+                 normalize_image: bool = True,
                  augmentation: bool = False,
                  max_lines_per_page: int = 768,
                  bos_token_id: int = 1,
@@ -105,6 +108,9 @@ class BaselineSegmentationDataset(Dataset):
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.line_token_id = line_token_id
+        self.normalizer = v2.Normalize(mean=(0.485, 0.456, 0.406),
+                                       std=(0.229, 0.224, 0.225)) if normalize_image else None
+        self.rng = np.random.default_rng()
 
         for file in files:
             with pa.memory_map(file, 'rb') as source:
@@ -133,15 +139,13 @@ class BaselineSegmentationDataset(Dataset):
         im, page_data = item['im'], item['lines']
         # skip pages with more than max_pos_embeddings lines
         if len(page_data) + 2 >= self.max_lines_per_page:
-            rng = np.random.default_rng()
-            idx = rng.integers(0, len(self))
+            idx = int(self.rng.integers(0, len(self)))
             return self[idx]
 
         try:
             im = Image.open(io.BytesIO(im)).convert('RGB')
         except Exception:
-            rng = np.random.default_rng()
-            idx = rng.integers(0, len(self))
+            idx = int(self.rng.integers(0, len(self)))
             return self[idx]
 
         im = self.transforms(im)
@@ -149,7 +153,7 @@ class BaselineSegmentationDataset(Dataset):
         lines = [x['curve'] for x in page_data]
         lines.append(8 * [-1.])
         lines.insert(0, 8 * [0])
-        lines = torch.tensor(lines)
+        lines = torch.tensor(lines, dtype=torch.float32)
         # one-hot encode cls here so we can embed curves and classes with a
         # single linear projection.
         line_cls = torch.full((len(lines),), self.line_token_id, dtype=torch.long)
@@ -161,6 +165,8 @@ class BaselineSegmentationDataset(Dataset):
             im = im.permute((1, 2, 0)).numpy()
             o = self.aug(image=im)
             im = torch.from_numpy(o['image'].transpose(2, 0, 1))
+        if self.normalizer:
+            im = self.normalizer(im)
 
         return {'image': im,
                 'tokens': line_cls,
