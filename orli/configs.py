@@ -22,6 +22,7 @@ class OrliSegmentationTrainingConfig(TrainingConfig):
         self.anchors = anchors
         self.fourier_features = kwargs.pop('fourier_features', True)
         self.logit_refinement = kwargs.pop('logit_refinement', True)
+        self.slurm = kwargs.pop('slurm', False)
 
         kwargs.setdefault('quit', 'fixed')
         kwargs.setdefault('epochs', 16)

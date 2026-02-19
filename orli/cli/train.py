@@ -126,8 +126,9 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
 @click.option('--logger',
               'pl_logger',
               type=click.Choice(['tensorboard', 'wandb']),
-              default=None,
               help='Logger to use for training.')
+@click.option('--slurm/--no-slurm',
+              help='Enable SLURM environment plugin with automatic job resubmission on preemption.')
 @click.argument('ground_truth', nargs=-1, callback=_expand_gt, type=click.Path(exists=False, dir_okay=False))
 @click.pass_context
 def train(ctx, **kwargs):
@@ -224,6 +225,11 @@ def train(ctx, **kwargs):
                                 save_dir=checkpoint_dir,
                                 log_model=False)
 
+    plugins = []
+    if params.get('slurm'):
+        from lightning.pytorch.plugins.environments import SLURMEnvironment
+        plugins.append(SLURMEnvironment(auto_requeue=True))
+
     trainer = Trainer(accelerator=ctx.meta['accelerator'],
                       devices=ctx.meta['devices'],
                       precision=ctx.meta['precision'],
@@ -237,6 +243,7 @@ def train(ctx, **kwargs):
                       gradient_clip_val=params['gradient_clip_val'],
                       num_sanity_val_steps=0,
                       logger=pl_logger if pl_logger else False,
+                      plugins=plugins if plugins else None,
                       **val_check_interval)
 
     with trainer.init_module(empty_init=False if (load or resume) else True):
