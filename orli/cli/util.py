@@ -26,9 +26,6 @@ import logging
 from typing import Optional
 
 import click
-import lightning as L
-
-from lightning.pytorch.callbacks import BaseFinetuning
 
 from typing import Any, TYPE_CHECKING
 

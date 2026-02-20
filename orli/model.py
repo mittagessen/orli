@@ -21,7 +21,7 @@ import lightning.pytorch as L
 
 from functools import partial
 from lightning.pytorch.callbacks import EarlyStopping
-from torch.optim import lr_scheduler, AdamW
+from torch.optim import lr_scheduler, Muon
 from torchmetrics.aggregation import MeanMetric
 from torch.utils.data import DataLoader
 from typing import Optional, Union, TYPE_CHECKING
@@ -478,7 +478,7 @@ class OrliSegmentationModel(L.LightningModule):
                 'initial_lr': self.hparams.config.lrate,  # Store for warmup
             })
 
-        optimizer = AdamW(param_groups, weight_decay=self.hparams.config.weight_decay)
+        optimizer = Muon(param_groups, weight_decay=self.hparams.config.weight_decay)
 
         # Configure learning rate scheduler
         len_train_set = len(self.trainer.datamodule.train_set)
