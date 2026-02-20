@@ -21,7 +21,9 @@ import lightning.pytorch as L
 
 from functools import partial
 from lightning.pytorch.callbacks import EarlyStopping
-from torch.optim import lr_scheduler, Muon
+from torch.optim import lr_scheduler
+
+from orli.modules.optimizer import MuonAdamW
 from torchmetrics.aggregation import MeanMetric
 from torch.utils.data import DataLoader
 from typing import Optional, Union, TYPE_CHECKING
@@ -442,43 +444,52 @@ class OrliSegmentationModel(L.LightningModule):
     # batch-wise learning rate warmup. In lr_scheduler_step() calls to the
     # scheduler are then only performed at the end of the epoch.
     def configure_optimizers(self):
-        # Selective learning rates: lower LR for pretrained encoder, full LR otherwise
-        param_groups = []
+        # Selective learning rates: lower LR for pretrained encoder, full LR otherwise.
+        # Muon only works with 2D parameters (weight matrices). Everything else
+        # (biases, norms, embeddings, 1D params) must use AdamW.
+        lr_map = {}
 
         # Encoder (pretrained) - lower LR when unfrozen
-        encoder_params = list(self.net.nn['encoder'].parameters())
-        encoder_lr = self.hparams.config.lrate * 0.1  # 10x lower for pretrained encoder
-        if any(p.requires_grad for p in encoder_params):
-            param_groups.append({
-                'params': [p for p in encoder_params if p.requires_grad],
-                'lr': encoder_lr,
-                'initial_lr': encoder_lr,  # Store for warmup
-            })
+        encoder_lr = self.hparams.config.lrate * 0.1
+        for p in self.net.nn['encoder'].parameters():
+            if p.requires_grad:
+                lr_map[id(p)] = encoder_lr
 
-        regressor_params = list(self.net.nn['regressor'].parameters())
+        # Regressor - higher LR
         regressor_lr = self.hparams.config.lrate * 5.0
-        if any(p.requires_grad for p in regressor_params):
-            param_groups.append({
-                'params': [p for p in regressor_params if p.requires_grad],
-                'lr': regressor_lr,
-                'initial_lr': regressor_lr,  # Store for warmup
-            })
+        for p in self.net.nn['regressor'].parameters():
+            if p.requires_grad:
+                lr_map[id(p)] = regressor_lr
 
         # Everything else (decoder + adapter) - full LR
-        encoder_param_ids = {id(p) for p in encoder_params}
-        regressor_param_ids = {id(p) for p in regressor_params}
-        other_params = [p for p in self.net.parameters()
-                        if id(p) not in encoder_param_ids
-                        and id(p) not in regressor_param_ids
-                        and p.requires_grad]
-        if other_params:
-            param_groups.append({
-                'params': other_params,
-                'lr': self.hparams.config.lrate,
-                'initial_lr': self.hparams.config.lrate,  # Store for warmup
-            })
+        for p in self.net.parameters():
+            if p.requires_grad and id(p) not in lr_map:
+                lr_map[id(p)] = self.hparams.config.lrate
 
-        optimizer = Muon(param_groups, weight_decay=self.hparams.config.weight_decay)
+        # Split into Muon (2D) and AdamW (non-2D) param groups, keyed by lr
+        muon_by_lr = {}
+        adam_by_lr = {}
+        for p in self.net.parameters():
+            if not p.requires_grad:
+                continue
+            target_lr = lr_map[id(p)]
+            if p.ndim == 2:
+                muon_by_lr.setdefault(target_lr, []).append(p)
+            else:
+                adam_by_lr.setdefault(target_lr, []).append(p)
+
+        muon_groups = [{'params': params, 'lr': lr, 'initial_lr': lr}
+                       for lr, params in muon_by_lr.items()]
+        adam_groups = [{'params': params, 'lr': lr, 'initial_lr': lr}
+                      for lr, params in adam_by_lr.items()]
+
+        optimizer = MuonAdamW(
+            muon_params=muon_groups,
+            adam_params=adam_groups,
+            muon_kwargs={'weight_decay': self.hparams.config.weight_decay},
+            adam_kwargs={'weight_decay': self.hparams.config.weight_decay,
+                        'betas': (0.9, 0.999)},
+        )
 
         # Configure learning rate scheduler
         len_train_set = len(self.trainer.datamodule.train_set)
