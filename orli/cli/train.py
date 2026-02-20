@@ -123,6 +123,9 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               help='Sets the training data format.')
 @click.option('-is', '--image-size', type=(int, int), help='Network input image size.')
 @click.option('--augment/--no-augment', help='Enable image augmentation')
+@click.option('--teacher-force-anchors/--no-teacher-force-anchors',
+              default=True,
+              help='Use nearest GT anchor IDs to initialize multi-anchor curve regression during validation.')
 @click.option('--logger',
               'pl_logger',
               type=click.Choice(['tensorboard', 'wandb']),

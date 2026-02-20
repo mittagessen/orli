@@ -40,54 +40,6 @@ logger = logging.getLogger(__name__)
 CURVE_STATS_INTERVAL = 200
 
 
-def _log_nan_loss_details(stage, batch_idx, loss, cls_loss, curve_loss, batch, global_step=None):
-    """Logs extra batch details to help diagnose NaN/Inf losses."""
-    with torch.no_grad():
-        tokens = batch.get('tokens')
-        curves = batch.get('curves')
-        image = batch.get('image')
-
-        token_valid = tokens[..., 0] != -1
-        curve_valid = curves[..., 0] != -1
-
-        token_counts = token_valid.sum(dim=1).detach().cpu().tolist()
-        curve_counts = curve_valid.sum(dim=1).detach().cpu().tolist()
-
-        line_counts = [max(0, c - 2) for c in token_counts]
-        token_target_counts = [max(0, c - 1) for c in token_counts]
-        curve_target_counts = [max(0, c - 1) for c in curve_counts]
-
-        total_lines = sum(line_counts)
-        total_token_targets = sum(token_target_counts)
-        total_curve_targets = sum(curve_target_counts)
-
-        valid_curve_mask = curves[..., 0] != -1
-        valid_curves = curves[valid_curve_mask]
-        valid_curve_rows = int(valid_curve_mask.sum().item())
-        if valid_curves.numel():
-            curve_min = valid_curves.min().item()
-            curve_max = valid_curves.max().item()
-            curves_in_sigmoid = (valid_curves >= 0).all().item() and (valid_curves <= 1).all().item()
-        else:
-            curve_min = float('nan')
-            curve_max = float('nan')
-            curves_in_sigmoid = False
-
-        step_info = f', global_step={global_step}' if global_step is not None else ''
-        logger.warning(
-            f'{stage} NaN/Inf loss detected at batch {batch_idx}{step_info}. '
-            f'loss={loss.item():.6g} cls_loss={cls_loss.item():.6g} curve_loss={curve_loss.item():.6g} '
-            f'batch_size={tokens.shape[0]} '
-            f'tokens_shape={tuple(tokens.shape)} curves_shape={tuple(curves.shape)} '
-            f'image_shape={tuple(image.shape) if image is not None else None} '
-            f'line_counts={line_counts} total_lines={total_lines} '
-            f'token_targets_total={total_token_targets} curve_targets_total={total_curve_targets} '
-            f'valid_curve_rows={valid_curve_rows} '
-            f'curve_min={curve_min:.6g} curve_max={curve_max:.6g} '
-            f'curves_in_sigmoid={curves_in_sigmoid}'
-        )
-
-
 if TYPE_CHECKING:
     from kraken.models import BaseModel
     from os import PathLike
@@ -97,7 +49,8 @@ if TYPE_CHECKING:
 def model_step(model,
                cls_criterion,
                curve_criterion,
-               batch):
+               batch,
+               teacher_force_anchors: bool = True):
 
     tokens = batch['tokens']
     curves = batch['curves']
@@ -123,13 +76,15 @@ def model_step(model,
     if model.nn['regressor'].num_anchors > 1:
         anchor_table = model.nn['regressor'].curve_anchors  # [num_anchors, 8]
         valid_gt = target_curves[valid_curves_mask]  # [M, 8]
-        target_anchor_idx = torch.full_like(target_cls_indices, -1)
+        full_anchor_idx = torch.full_like(target_cls_indices, -1)
         if valid_gt.numel():
             dists = (valid_gt.unsqueeze(1) - anchor_table.unsqueeze(0)).abs().sum(-1)  # [M, N]
             nearest = dists.argmin(dim=-1)  # [M]
-            target_anchor_idx[valid_curves_mask] = nearest
+            full_anchor_idx[valid_curves_mask] = nearest
         line_mask = target_cls_indices == 3
-        target_cls_indices[line_mask] = 3 + target_anchor_idx[line_mask].clamp(min=0)
+        target_cls_indices[line_mask] = 3 + full_anchor_idx[line_mask].clamp(min=0)
+        if teacher_force_anchors:
+            target_anchor_idx = full_anchor_idx
 
     # our tokens already contain BOS/EOS tokens so we just run it
     # through the model after replacing ignored indices.
@@ -306,14 +261,8 @@ class OrliSegmentationModel(L.LightningModule):
         loss, cls_loss, curve_loss = model_step(self.net,
                                                 self.cls_criterion,
                                                 self.curve_criterion,
-                                                batch)
-        # Handle NaN/Inf losses in DDP by replacing with zero loss
-        # This ensures all processes participate in gradient sync while
-        # preventing NaN gradients from corrupting the model
-        if torch.isnan(loss) or torch.isinf(loss):
-            _log_nan_loss_details('train', batch_idx, loss, cls_loss, curve_loss, batch, self.global_step)
-            # Create zero loss connected to graph via output projection weights
-            loss = 0.0 * sum(p.sum() for p in self.net.parameters() if p.requires_grad)
+                                                batch,
+                                                teacher_force_anchors=True)
         self.log('train_loss',
                  loss,
                  batch_size=batch['tokens'].shape[0],
@@ -341,9 +290,10 @@ class OrliSegmentationModel(L.LightningModule):
         loss, cls_loss, curve_loss = model_step(self.net,
                                                 self.cls_criterion,
                                                 self.curve_criterion,
-                                                batch)
-        if torch.isnan(loss) or torch.isinf(loss):
-            _log_nan_loss_details('val', batch_idx, loss, cls_loss, curve_loss, batch, self.global_step)
+                                                batch,
+                                                teacher_force_anchors=getattr(self.hparams.config,
+                                                                              'teacher_force_anchors',
+                                                                              True))
         self.val_mean.update(loss)
         self.log('val_cls_loss',
                  cls_loss,
@@ -506,7 +456,7 @@ class OrliSegmentationModel(L.LightningModule):
             })
 
         regressor_params = list(self.net.nn['regressor'].parameters())
-        regressor_lr = self.hparams.config.lrate
+        regressor_lr = self.hparams.config.lrate * 5.0
         if any(p.requires_grad for p in regressor_params):
             param_groups.append({
                 'params': [p for p in regressor_params if p.requires_grad],

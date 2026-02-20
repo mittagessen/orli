@@ -20,6 +20,8 @@ class OrliSegmentationTrainingConfig(TrainingConfig):
         self.freeze_encoder = kwargs.pop('freeze_encoder', False)
         anchors = kwargs.pop('anchors', _default_anchors)
         self.anchors = anchors
+        # Validation-only switch. Training always uses teacher-forced anchors.
+        self.teacher_force_anchors = kwargs.pop('teacher_force_anchors', True)
         self.fourier_features = kwargs.pop('fourier_features', True)
         self.logit_refinement = kwargs.pop('logit_refinement', True)
         self.slurm = kwargs.pop('slurm', False)
