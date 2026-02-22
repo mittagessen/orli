@@ -44,20 +44,25 @@ class MuonAdamW(torch.optim.Optimizer):
         self._optimizer_step_post_hooks = {}
 
     def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
         # Ensure sub-optimizers see the current param_groups (LR scheduler
         # modifies them in-place on the shared list).
         if self.muon:
             self.muon.param_groups = self.param_groups[:self._muon_len]
         if self.adam:
             self.adam.param_groups = self.param_groups[self._muon_len:]
-
-        loss = None
         if self.muon:
-            loss = self.muon.step(closure=None)
+            muon_loss = self.muon.step(closure=None)
+            if muon_loss is not None:
+                loss = muon_loss
         if self.adam:
-            loss = self.adam.step(closure=None)
-        if closure is not None:
-            loss = closure()
+            adam_loss = self.adam.step(closure=None)
+            if adam_loss is not None:
+                loss = adam_loss
         return loss
 
     def zero_grad(self, set_to_none=True):
