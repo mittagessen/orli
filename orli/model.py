@@ -247,7 +247,8 @@ class OrliSegmentationModel(L.LightningModule):
         else:
             self.net = None
 
-        self.val_mean = MeanMetric()
+        self.val_cls_mean = MeanMetric()
+        self.val_curve_mean = MeanMetric()
         self.cls_criterion = torch.nn.CrossEntropyLoss(reduction='sum')
         self.curve_criterion = torch.nn.L1Loss(reduction='sum')
         self.test_tolerance = 10.0
@@ -289,6 +290,9 @@ class OrliSegmentationModel(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
+        num_token_targets = (batch['tokens'][..., 1:, 0] != -1).sum().clamp_min(1)
+        num_curve_targets = (batch['curves'][..., 1:, 0] != -1).sum().clamp_min(1)
+
         loss, cls_loss, curve_loss = model_step(self.net,
                                                 self.cls_criterion,
                                                 self.curve_criterion,
@@ -296,30 +300,40 @@ class OrliSegmentationModel(L.LightningModule):
                                                 teacher_force_anchors=getattr(self.hparams.config,
                                                                               'teacher_force_anchors',
                                                                               True))
-        self.val_mean.update(loss)
-        self.log('val_cls_loss',
-                 cls_loss,
-                 batch_size=batch['tokens'].shape[0],
-                 on_step=False,
-                 on_epoch=True,
-                 prog_bar=True,
-                 logger=True,
-                 sync_dist=True)
-        self.log('val_curve_loss',
-                 curve_loss,
-                 batch_size=batch['tokens'].shape[0],
-                 on_step=False,
-                 on_epoch=True,
-                 prog_bar=True,
-                 logger=True,
-                 sync_dist=True)
+        self.val_cls_mean.update(cls_loss.detach(),
+                                 weight=num_token_targets.to(device=cls_loss.device, dtype=cls_loss.dtype))
+        self.val_curve_mean.update(curve_loss.detach(),
+                                   weight=num_curve_targets.to(device=curve_loss.device, dtype=curve_loss.dtype))
         return loss
 
     def on_validation_epoch_end(self):
         if not self.trainer.sanity_checking:
-            self.log('val_metric', self.val_mean.compute(), on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            val_cls_loss = self.val_cls_mean.compute()
+            val_curve_loss = self.val_curve_mean.compute()
+            self.log('val_cls_loss',
+                     val_cls_loss,
+                     on_step=False,
+                     on_epoch=True,
+                     prog_bar=True,
+                     logger=True,
+                     sync_dist=True)
+            self.log('val_curve_loss',
+                     val_curve_loss,
+                     on_step=False,
+                     on_epoch=True,
+                     prog_bar=True,
+                     logger=True,
+                     sync_dist=True)
+            self.log('val_metric',
+                     val_cls_loss + val_curve_loss,
+                     on_step=False,
+                     on_epoch=True,
+                     prog_bar=True,
+                     logger=True,
+                     sync_dist=True)
             self.log('global_step', self.global_step, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
-        self.val_mean.reset()
+        self.val_cls_mean.reset()
+        self.val_curve_mean.reset()
 
     def configure_test(self, test_config: OrliSegmentationTestConfig):
         self._test_config = test_config
