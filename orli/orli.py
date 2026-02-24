@@ -50,7 +50,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
     bos_id: int = 1
     eos_id: int = 2
     model_type = ['segmentation']
-    _kraken_min_version = '6.0.0'
+    _kraken_min_version = '6.99.99'
 
     def __init__(self, **kwargs):
         super().__init__()
