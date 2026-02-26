@@ -53,6 +53,7 @@ OrliSegmentationTrainingConfig = "orli.configs:OrliSegmentationTrainingConfig"
 source = "versioningit"
 
 [tool.versioningit]
+default-version = "0.0.0"
 
 [tool.hatch.build.targets.wheel]
 packages = ["orli"]
