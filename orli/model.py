@@ -47,6 +47,25 @@ if TYPE_CHECKING:
     from os import PathLike
 
 
+def _orli_model_kwargs(config, image_size):
+    return {'image_size': image_size,
+            'anchors': config.anchors,
+            'fourier_features': getattr(config, 'fourier_features', True),
+            'logit_refinement': getattr(config, 'logit_refinement', True),
+            'encoder_name': getattr(config, 'encoder_name', 'convnextv2_tiny'),
+            'encoder_idxs': getattr(config, 'encoder_idxs', (1, 2, 3)),
+            'neck_type': getattr(config, 'neck_type', 'simple'),
+            'neck_num_layers': getattr(config, 'neck_num_layers', 1),
+            'neck_num_heads': getattr(config, 'neck_num_heads', 8),
+            'neck_hidden_dim': getattr(config, 'neck_hidden_dim', 256),
+            'neck_use_encoder_idx': getattr(config, 'neck_use_encoder_idx', None),
+            'neck_output_ds_factors': getattr(config, 'neck_output_ds_factors', None),
+            'neck_norm': getattr(config, 'neck_norm', 'group'),
+            'neck_ffn_dim': getattr(config, 'neck_ffn_dim', 1024),
+            'neck_dropout': getattr(config, 'neck_dropout', 0.0),
+            'neck_fusion_depth': getattr(config, 'neck_fusion_depth', 2)}
+
+
 @torch.compile()
 def model_step(model,
                cls_criterion,
@@ -388,10 +407,8 @@ class OrliSegmentationModel(L.LightningModule):
         if stage in [None, 'fit']:
             if self.net is None:
                 self.net = create_model('OrliModel',
-                                        image_size=self.trainer.datamodule.hparams.data_config.image_size,
-                                        anchors=self.hparams.config.anchors,
-                                        fourier_features=self.hparams.config.fourier_features,
-                                        logit_refinement=self.hparams.config.logit_refinement)
+                                        **_orli_model_kwargs(self.hparams.config,
+                                                             self.trainer.datamodule.hparams.data_config.image_size))
 
             if self.hparams.config.freeze_encoder:
                 for param in self.net.nn['encoder'].parameters():
@@ -417,10 +434,7 @@ class OrliSegmentationModel(L.LightningModule):
         data_config = checkpoint['datamodule_hyper_parameters']['data_config']
         cfg = checkpoint['_module_config']
         self.net = create_model('OrliModel',
-                                image_size=data_config.image_size,
-                                anchors=cfg.anchors,
-                                fourier_features=getattr(cfg, 'fourier_features', True),
-                                logit_refinement=getattr(cfg, 'logit_refinement', True))
+                                **_orli_model_kwargs(cfg, data_config.image_size))
 
     @classmethod
     def load_from_weights(cls,
@@ -475,7 +489,7 @@ class OrliSegmentationModel(L.LightningModule):
             if p.requires_grad:
                 lr_map[id(p)] = regressor_lr
 
-        # Everything else (decoder + adapter) - full LR
+        # Everything else (decoder + neck) - full LR
         for p in self.net.parameters():
             if p.requires_grad and id(p) not in lr_map:
                 lr_map[id(p)] = self.hparams.config.lrate

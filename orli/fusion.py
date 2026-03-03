@@ -22,6 +22,7 @@ import json
 import math
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                           TransformerCrossAttentionLayer, FeedForward,
@@ -33,7 +34,7 @@ from orli.modules.transformer import _get_clones
 
 logger = logging.getLogger(__name__)
 
-__all__ = ['baseline_decoder', 'CurveRegressionHead']
+__all__ = ['baseline_decoder', 'OrliAdapter', 'OrliHybridNeck', 'CurveRegressionHead']
 
 
 class CurveTokenEmbedding(nn.Module):
@@ -230,6 +231,180 @@ def baseline_decoder(vocab_size: int = 12,
     return decoder
 
 
+class LayerNorm2d(nn.Module):
+    def __init__(self, channels: int, eps: float = 1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(channels))
+        self.bias = nn.Parameter(torch.zeros(channels))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.permute(0, 2, 3, 1)
+        x = F.layer_norm(x, (self.weight.shape[0],), self.weight, self.bias, self.eps)
+        return x.permute(0, 3, 1, 2)
+
+
+def _group_count(channels: int, max_groups: int = 32) -> int:
+    for groups in range(min(max_groups, channels), 0, -1):
+        if channels % groups == 0:
+            return groups
+    return 1
+
+
+def build_2d_norm(norm_type: str, channels: int) -> nn.Module:
+    if norm_type == 'batch':
+        return nn.BatchNorm2d(channels)
+    if norm_type == 'group':
+        return nn.GroupNorm(_group_count(channels), channels)
+    if norm_type == 'layer':
+        return LayerNorm2d(channels)
+    raise ValueError(f'Unsupported neck normalization: {norm_type}')
+
+
+def build_activation(name: str) -> nn.Module:
+    if name == 'gelu':
+        return nn.GELU()
+    if name == 'relu':
+        return nn.ReLU(inplace=True)
+    if name == 'silu':
+        return nn.SiLU(inplace=True)
+    raise ValueError(f'Unsupported activation: {name}')
+
+
+def build_2d_sincos_position_embedding(height: int,
+                                       width: int,
+                                       embed_dim: int,
+                                       temperature: float = 10000.0,
+                                       *,
+                                       device: Optional[torch.device] = None,
+                                       dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    if embed_dim % 4 != 0:
+        raise ValueError('Embedding dimension must be divisible by 4 for 2D sin-cos PE.')
+    grid_y = torch.arange(height, dtype=torch.float32, device=device)
+    grid_x = torch.arange(width, dtype=torch.float32, device=device)
+    grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing='ij')
+    pos_dim = embed_dim // 4
+    omega = torch.arange(pos_dim, dtype=torch.float32, device=device) / pos_dim
+    omega = 1.0 / (temperature ** omega)
+    out_x = grid_x.reshape(-1, 1) * omega.reshape(1, -1)
+    out_y = grid_y.reshape(-1, 1) * omega.reshape(1, -1)
+    pe = torch.cat([out_x.sin(), out_x.cos(), out_y.sin(), out_y.cos()], dim=1)
+    return pe.to(dtype=dtype).unsqueeze(0)
+
+
+class ConvNormAct2d(nn.Module):
+    def __init__(self,
+                 in_channels: int,
+                 out_channels: int,
+                 kernel_size: int,
+                 stride: int = 1,
+                 *,
+                 groups: int = 1,
+                 padding: Optional[int] = None,
+                 norm_type: str = 'group',
+                 act: Optional[str] = 'silu'):
+        super().__init__()
+        if padding is None:
+            padding = (kernel_size - 1) // 2
+        self.conv = nn.Conv2d(in_channels,
+                              out_channels,
+                              kernel_size=kernel_size,
+                              stride=stride,
+                              padding=padding,
+                              groups=groups,
+                              bias=False)
+        self.norm = build_2d_norm(norm_type, out_channels)
+        self.act = nn.Identity() if act is None else build_activation(act)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.norm(self.conv(x)))
+
+
+class ResidualConvBlock(nn.Module):
+    def __init__(self,
+                 in_channels: int,
+                 out_channels: int,
+                 *,
+                 norm_type: str = 'group',
+                 act: str = 'silu'):
+        super().__init__()
+        self.conv1 = ConvNormAct2d(in_channels, out_channels, 3, norm_type=norm_type, act=act)
+        self.conv2 = ConvNormAct2d(out_channels, out_channels, 3, norm_type=norm_type, act=None)
+        self.shortcut = (nn.Identity() if in_channels == out_channels else
+                         ConvNormAct2d(in_channels, out_channels, 1, norm_type=norm_type, act=None))
+        self.act = build_activation(act)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.conv2(self.conv1(x)) + self.shortcut(x))
+
+
+class FusionConvBlock(nn.Module):
+    def __init__(self,
+                 in_channels: int,
+                 out_channels: int,
+                 *,
+                 depth: int = 2,
+                 norm_type: str = 'group',
+                 act: str = 'silu'):
+        super().__init__()
+        layers = [ResidualConvBlock(in_channels, out_channels, norm_type=norm_type, act=act)]
+        for _ in range(depth - 1):
+            layers.append(ResidualConvBlock(out_channels, out_channels, norm_type=norm_type, act=act))
+        self.block = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x)
+
+
+class SpatialTransformerEncoderLayer(nn.Module):
+    def __init__(self,
+                 embed_dim: int,
+                 num_heads: int,
+                 dim_feedforward: int,
+                 dropout: float = 0.0,
+                 act: str = 'gelu'):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.self_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.mlp = nn.Sequential(nn.Linear(embed_dim, dim_feedforward),
+                                 build_activation(act),
+                                 nn.Dropout(dropout),
+                                 nn.Linear(dim_feedforward, embed_dim))
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, pos_embed: Optional[torch.Tensor] = None) -> torch.Tensor:
+        y = self.norm1(x)
+        if pos_embed is not None:
+            y = y + pos_embed
+        attn_out, _ = self.self_attn(y, y, value=self.norm1(x), need_weights=False)
+        x = x + self.dropout(attn_out)
+        x = x + self.dropout(self.mlp(self.norm2(x)))
+        return x
+
+
+class SpatialTransformerEncoder(nn.Module):
+    def __init__(self,
+                 embed_dim: int,
+                 num_heads: int,
+                 dim_feedforward: int,
+                 num_layers: int,
+                 dropout: float = 0.0,
+                 act: str = 'gelu'):
+        super().__init__()
+        self.layers = nn.ModuleList([SpatialTransformerEncoderLayer(embed_dim,
+                                                                    num_heads,
+                                                                    dim_feedforward,
+                                                                    dropout=dropout,
+                                                                    act=act)
+                                     for _ in range(num_layers)])
+
+    def forward(self, x: torch.Tensor, pos_embed: Optional[torch.Tensor] = None) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x, pos_embed=pos_embed)
+        return x
+
+
 class OrliAdapter(nn.Module):
     """
     Builds an adapter head consisting of depthwise-separable downsampling
@@ -308,6 +483,162 @@ class OrliAdapter(nn.Module):
             hidden_state = self.adapter[idx](hidden_state)
             os.append(self.pos_embeddings[idx](hidden_state))
         return torch.cat(os, dim=1)
+
+
+class OrliHybridNeck(nn.Module):
+    """
+    A hybrid multiscale neck with shared channel projection, optional
+    transformer encoding on selected scales, top-down FPN fusion, and
+    bottom-up PAN fusion before flattening into decoder memory tokens.
+    """
+
+    def __init__(self,
+                 encoder_embed_dims: list[int],
+                 encoder_sizes: list[tuple[int, int]],
+                 decoder_embed_dim: int,
+                 hidden_dim: int = 256,
+                 num_heads: int = 8,
+                 num_encoder_layers: int = 1,
+                 use_encoder_idx: Optional[list[int]] = None,
+                 output_ds_factors: Optional[list[int]] = None,
+                 norm_type: str = 'group',
+                 dim_feedforward: int = 1024,
+                 dropout: float = 0.0,
+                 fusion_depth: int = 2,
+                 transformer_act: str = 'gelu',
+                 conv_act: str = 'silu'):
+        super().__init__()
+        if output_ds_factors is None:
+            output_ds_factors = [2] * len(encoder_embed_dims)
+        if len(output_ds_factors) != len(encoder_embed_dims):
+            raise ValueError('output_ds_factors must match the number of encoder feature maps.')
+        if use_encoder_idx is None:
+            use_encoder_idx = [len(encoder_embed_dims) - 1]
+        use_encoder_idx = sorted(use_encoder_idx)
+        if any(idx < 0 or idx >= len(encoder_embed_dims) for idx in use_encoder_idx):
+            raise ValueError('use_encoder_idx contains invalid feature map indices.')
+
+        self.hidden_dim = hidden_dim
+        self.decoder_embed_dim = decoder_embed_dim
+        self.encoder_sizes = encoder_sizes
+        self.output_ds_factors = list(output_ds_factors)
+        self.use_encoder_idx = use_encoder_idx
+        self.output_sizes = [(size[0] // ds_factor, size[1] // ds_factor)
+                             for size, ds_factor in zip(encoder_sizes, self.output_ds_factors)]
+
+        self.input_proj = nn.ModuleList([nn.Sequential(nn.Conv2d(channels,
+                                                                 hidden_dim,
+                                                                 kernel_size=1,
+                                                                 bias=False),
+                                                       build_2d_norm(norm_type, hidden_dim))
+                                         for channels in encoder_embed_dims])
+
+        self.encoders = nn.ModuleList([SpatialTransformerEncoder(hidden_dim,
+                                                                 num_heads,
+                                                                 dim_feedforward,
+                                                                 num_encoder_layers,
+                                                                 dropout=dropout,
+                                                                 act=transformer_act)
+                                       for _ in self.use_encoder_idx])
+
+        self.lateral_convs = nn.ModuleList()
+        self.fpn_blocks = nn.ModuleList()
+        for _ in range(len(encoder_embed_dims) - 1):
+            self.lateral_convs.append(ConvNormAct2d(hidden_dim, hidden_dim, 1, norm_type=norm_type, act=conv_act))
+            self.fpn_blocks.append(FusionConvBlock(hidden_dim * 2,
+                                                   hidden_dim,
+                                                   depth=fusion_depth,
+                                                   norm_type=norm_type,
+                                                   act=conv_act))
+
+        self.downsample_convs = nn.ModuleList()
+        self.pan_blocks = nn.ModuleList()
+        for _ in range(len(encoder_embed_dims) - 1):
+            self.downsample_convs.append(ConvNormAct2d(hidden_dim,
+                                                       hidden_dim,
+                                                       3,
+                                                       stride=2,
+                                                       norm_type=norm_type,
+                                                       act=conv_act))
+            self.pan_blocks.append(FusionConvBlock(hidden_dim * 2,
+                                                   hidden_dim,
+                                                   depth=fusion_depth,
+                                                   norm_type=norm_type,
+                                                   act=conv_act))
+
+        self.output_downsample = nn.ModuleList([self._make_output_downsample(hidden_dim, ds_factor, norm_type, conv_act)
+                                                for ds_factor in self.output_ds_factors])
+        self.output_proj = nn.ModuleList([nn.Conv2d(hidden_dim, decoder_embed_dim, kernel_size=1, bias=False)
+                                          for _ in encoder_embed_dims])
+        self.level_embeddings = nn.Parameter(torch.zeros(len(encoder_embed_dims), decoder_embed_dim))
+        nn.init.normal_(self.level_embeddings, std=0.02)
+
+    def _make_output_downsample(self,
+                                channels: int,
+                                ds_factor: int,
+                                norm_type: str,
+                                act: str) -> nn.Module:
+        if ds_factor <= 1:
+            return nn.Identity()
+        return nn.Sequential(
+            ConvNormAct2d(channels,
+                          channels,
+                          ds_factor,
+                          stride=ds_factor,
+                          groups=channels,
+                          padding=0,
+                          norm_type=norm_type,
+                          act=act),
+            ConvNormAct2d(channels, channels, 1, norm_type=norm_type, act=act),
+        )
+
+    def _encode_scale(self, feat: torch.Tensor, encoder: SpatialTransformerEncoder) -> torch.Tensor:
+        batch_size, _, height, width = feat.shape
+        src = feat.flatten(2).transpose(1, 2)
+        pos_embed = build_2d_sincos_position_embedding(height,
+                                                       width,
+                                                       self.hidden_dim,
+                                                       device=src.device,
+                                                       dtype=src.dtype)
+        src = encoder(src, pos_embed=pos_embed)
+        return src.transpose(1, 2).reshape(batch_size, self.hidden_dim, height, width).contiguous()
+
+    def _flatten_output(self, feat: torch.Tensor, level_idx: int) -> torch.Tensor:
+        feat = self.output_downsample[level_idx](feat)
+        feat = self.output_proj[level_idx](feat)
+        _, _, height, width = feat.shape
+        tokens = feat.flatten(2).transpose(1, 2)
+        pos_embed = build_2d_sincos_position_embedding(height,
+                                                       width,
+                                                       self.decoder_embed_dim,
+                                                       device=tokens.device,
+                                                       dtype=tokens.dtype)
+        level_embed = self.level_embeddings[level_idx].view(1, 1, -1)
+        return tokens + pos_embed + level_embed
+
+    def forward(self, encoder_hidden_states: list[torch.Tensor]) -> torch.Tensor:
+        proj_feats = [proj(feat) for proj, feat in zip(self.input_proj, encoder_hidden_states)]
+
+        for encoder, feat_idx in zip(self.encoders, self.use_encoder_idx):
+            proj_feats[feat_idx] = self._encode_scale(proj_feats[feat_idx], encoder)
+
+        inner_outs = [proj_feats[-1]]
+        for level_idx, feat_idx in enumerate(range(len(proj_feats) - 1, 0, -1)):
+            high = self.lateral_convs[level_idx](inner_outs[0])
+            low = proj_feats[feat_idx - 1]
+            inner_outs[0] = high
+            upsampled = F.interpolate(high, size=low.shape[-2:], mode='nearest')
+            inner_out = self.fpn_blocks[level_idx](torch.cat([upsampled, low], dim=1))
+            inner_outs.insert(0, inner_out)
+
+        outs = [inner_outs[0]]
+        for level_idx in range(len(inner_outs) - 1):
+            low = outs[-1]
+            high = inner_outs[level_idx + 1]
+            downsampled = self.downsample_convs[level_idx](low)
+            outs.append(self.pan_blocks[level_idx](torch.cat([downsampled, high], dim=1)))
+
+        return torch.cat([self._flatten_output(feat, level_idx) for level_idx, feat in enumerate(outs)], dim=1)
 
 
 def inverse_sigmoid(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:

@@ -26,7 +26,7 @@ from typing import Optional, Any, Union
 from collections.abc import Generator
 
 from orli.configs import OrliSegmentationInferenceConfig
-from orli.fusion import baseline_decoder, OrliAdapter, CurveRegressionHead
+from orli.fusion import baseline_decoder, OrliAdapter, OrliHybridNeck, CurveRegressionHead
 from orli.dataset import get_default_transforms
 from orli.modules.bezier import sample_bezier_curve
 
@@ -55,15 +55,24 @@ class OrliModel(nn.Module, SegmentationBaseModel):
     def __init__(self, **kwargs):
         super().__init__()
 
-        adapter_num_layers = 1
-        adapter_num_heads = 8
-        encoder_idxs = [1, 2, 3]
-
         if (image_size := kwargs.get('image_size', None)) is None:
             raise ValueError('image_size argument is missing in args.')
 
         if (anchors := kwargs.get('anchors', None)) is None:
             raise ValueError('anchors argument is missing in args.')
+
+        encoder_name = kwargs.get('encoder_name', 'convnextv2_tiny')
+        encoder_idxs = list(kwargs.get('encoder_idxs', (1, 2, 3)))
+        neck_type = kwargs.get('neck_type', 'simple')
+        neck_num_layers = kwargs.get('neck_num_layers', 1)
+        neck_num_heads = kwargs.get('neck_num_heads', 8)
+        neck_hidden_dim = kwargs.get('neck_hidden_dim', 256)
+        neck_use_encoder_idx = kwargs.get('neck_use_encoder_idx', None)
+        neck_output_ds_factors = kwargs.get('neck_output_ds_factors', None)
+        neck_norm = kwargs.get('neck_norm', 'group')
+        neck_ffn_dim = kwargs.get('neck_ffn_dim', 1024)
+        neck_dropout = kwargs.get('neck_dropout', 0.0)
+        neck_fusion_depth = kwargs.get('neck_fusion_depth', 2)
 
         self.user_metadata: dict[str, Any] = {'accuracy': [],
                                                'metrics': []}
@@ -71,7 +80,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
 
         logger.info('Creating segmentation model')
 
-        encoder_model = timm.create_model('convnextv2_tiny',
+        encoder_model = timm.create_model(encoder_name,
                                           pretrained=True,
                                           features_only=True,
                                           out_indices=encoder_idxs)
@@ -80,11 +89,28 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                           int(image_size[1]/encoder_model.feature_info.reduction(idx)),
                           encoder_model.feature_info.channels(idx)) for idx in encoder_idxs]
 
-        adapter = OrliAdapter(adapter_num_layers,
-                              adapter_num_heads,
-                              encoder_embed_dims=[x[2] for x in encoder_sizes],
-                              encoder_sizes=[x[:2] for x in encoder_sizes],
-                              decoder_embed_dim=576)
+        if neck_type == 'simple':
+            adapter = OrliAdapter(neck_num_layers,
+                                  neck_num_heads,
+                                  encoder_embed_dims=[x[2] for x in encoder_sizes],
+                                  encoder_sizes=[x[:2] for x in encoder_sizes],
+                                  decoder_embed_dim=576,
+                                  ds_factors=neck_output_ds_factors)
+        elif neck_type == 'hybrid':
+            adapter = OrliHybridNeck(encoder_embed_dims=[x[2] for x in encoder_sizes],
+                                     encoder_sizes=[x[:2] for x in encoder_sizes],
+                                     decoder_embed_dim=576,
+                                     hidden_dim=neck_hidden_dim,
+                                     num_heads=neck_num_heads,
+                                     num_encoder_layers=neck_num_layers,
+                                     use_encoder_idx=neck_use_encoder_idx,
+                                     output_ds_factors=neck_output_ds_factors,
+                                     norm_type=neck_norm,
+                                     dim_feedforward=neck_ffn_dim,
+                                     dropout=neck_dropout,
+                                     fusion_depth=neck_fusion_depth)
+        else:
+            raise ValueError(f'Unknown neck_type {neck_type}')
 
         fourier_features = kwargs.get('fourier_features', True)
         logit_refinement = kwargs.get('logit_refinement', True)

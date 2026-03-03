@@ -55,7 +55,10 @@ def test(ctx, **kwargs):
     Computes baseline detection metrics (Precision, Recall, F1) and
     reading order metrics (Spearman footrule, Kendall tau).
     """
-    params = ctx.params.copy()
+    params = {}
+    if ctx.default_map:
+        params.update(ctx.default_map)
+    params.update(ctx.params)
     params.update(ctx.meta)
 
     load = params.pop('load', None)

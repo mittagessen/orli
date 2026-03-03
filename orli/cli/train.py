@@ -138,7 +138,10 @@ def train(ctx, **kwargs):
     """
     Trains an object detection model from XML facsimile files.
     """
-    params = ctx.params.copy()
+    params = {}
+    if ctx.default_map:
+        params.update(ctx.default_map)
+    params.update(ctx.params)
     params.update(ctx.meta)
     resume = params.pop('resume', None)
     load = params.pop('load', None)
