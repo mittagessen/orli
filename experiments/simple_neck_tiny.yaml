@@ -20,6 +20,7 @@ train:
   batch_size: 8
   val_batch_size: 8
   accumulate_grad_batches: 8
+  pl_logger: wandb
   encoder_name: convnextv2_tiny
   encoder_idxs: [1, 2, 3]
   neck_type: simple
