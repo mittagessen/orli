@@ -71,7 +71,8 @@ def model_step(model,
                cls_criterion,
                curve_criterion,
                batch,
-               teacher_force_anchors: bool = True):
+               teacher_force_anchors: bool = True,
+               cls_loss_weight: float = 1.0):
 
     tokens = batch['tokens']
     curves = batch['curves']
@@ -140,7 +141,7 @@ def model_step(model,
         curve_ctrl_loss = curve_criterion(pred_curves, batch_target_curves) / num_curve_targets
         curve_loss = curve_points_loss + curve_ctrl_loss
 
-        _loss = cls_loss + curve_loss
+        _loss = cls_loss_weight * cls_loss + curve_loss
         losses = _loss if losses is None else losses + _loss
         cls_losses = cls_loss if cls_losses is None else cls_losses + cls_loss
         curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
@@ -268,7 +269,7 @@ class OrliSegmentationModel(L.LightningModule):
 
         self.val_cls_mean = MeanMetric()
         self.val_curve_mean = MeanMetric()
-        self.cls_criterion = torch.nn.CrossEntropyLoss(reduction='sum')
+        self.cls_criterion = torch.nn.CrossEntropyLoss(reduction='sum', label_smoothing=0.1)
         self.curve_criterion = torch.nn.L1Loss(reduction='sum')
         self.test_tolerance = 10.0
         self.test_match_threshold = 0.5
@@ -284,7 +285,8 @@ class OrliSegmentationModel(L.LightningModule):
                                                 self.cls_criterion,
                                                 self.curve_criterion,
                                                 batch,
-                                                teacher_force_anchors=True)
+                                                teacher_force_anchors=True,
+                                                cls_loss_weight=self.hparams.config.cls_loss_weight)
         self.log('train_loss',
                  loss,
                  batch_size=batch['tokens'].shape[0],
@@ -318,7 +320,8 @@ class OrliSegmentationModel(L.LightningModule):
                                                 batch,
                                                 teacher_force_anchors=getattr(self.hparams.config,
                                                                               'teacher_force_anchors',
-                                                                              True))
+                                                                              True),
+                                                cls_loss_weight=self.hparams.config.cls_loss_weight)
         self.val_cls_mean.update(cls_loss.detach(),
                                  weight=num_token_targets.to(device=cls_loss.device, dtype=cls_loss.dtype))
         self.val_curve_mean.update(curve_loss.detach(),
@@ -483,11 +486,17 @@ class OrliSegmentationModel(L.LightningModule):
             if p.requires_grad:
                 lr_map[id(p)] = encoder_lr
 
-        # Regressor - higher LR
+        # Regressor regression heads + norms - higher LR
         regressor_lr = self.hparams.config.lrate * 5.0
-        for p in self.net.nn['regressor'].parameters():
+        for module in [self.net.nn['regressor'].reg_projs, self.net.nn['regressor'].norms]:
+            for p in module.parameters():
+                if p.requires_grad:
+                    lr_map[id(p)] = regressor_lr
+
+        # Regressor classification heads - base LR (overfits faster)
+        for p in self.net.nn['regressor'].cls_projs.parameters():
             if p.requires_grad:
-                lr_map[id(p)] = regressor_lr
+                lr_map[id(p)] = self.hparams.config.lrate
 
         # Everything else (decoder + neck) - full LR
         for p in self.net.parameters():

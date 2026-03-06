@@ -62,6 +62,7 @@ class OrliSegmentationTrainingConfig(TrainingConfig):
         self.teacher_force_anchors = kwargs.pop('teacher_force_anchors', True)
         self.fourier_features = kwargs.pop('fourier_features', True)
         self.logit_refinement = kwargs.pop('logit_refinement', True)
+        self.cls_loss_weight = kwargs.pop('cls_loss_weight', 1.0)
         self.slurm = kwargs.pop('slurm', False)
 
         kwargs.setdefault('quit', 'fixed')
