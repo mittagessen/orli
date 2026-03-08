@@ -269,7 +269,7 @@ class OrliSegmentationModel(L.LightningModule):
 
         self.val_cls_mean = MeanMetric()
         self.val_curve_mean = MeanMetric()
-        self.cls_criterion = torch.nn.CrossEntropyLoss(reduction='sum', label_smoothing=0.1)
+        self.cls_criterion = torch.nn.CrossEntropyLoss(reduction='sum')
         self.curve_criterion = torch.nn.L1Loss(reduction='sum')
         self.test_tolerance = 10.0
         self.test_match_threshold = 0.5
