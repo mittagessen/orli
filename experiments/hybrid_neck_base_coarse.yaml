@@ -8,7 +8,7 @@ train:
     - /home/bkiessling/synth.lst
   evaluation_data:
     - /home/bkiessling/val.lst
-  checkpoint_path: /home/bkiessling/experiments/orli_hybrid_neck_base_coarse
+  checkpoint_path: /home/bkiessling/experiments/orli_hybrid_neck_small_coarse
   optimizer: AdamW
   epochs: 24
   lrate: 5e-4
@@ -17,7 +17,7 @@ train:
   cos_min_lr: 5e-6
   warmup: 1000
   augment: true
-  batch_size: 8
+  batch_size: 36
   val_batch_size: 8
   accumulate_grad_batches: 8
   pl_logger: wandb
