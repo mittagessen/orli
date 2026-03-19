@@ -30,6 +30,8 @@ from typing import Optional, Union, TYPE_CHECKING
 
 from kraken.models import create_model
 
+from torchvision.ops import sigmoid_focal_loss
+
 from orli.modules.bezier import sample_bezier_curve
 from orli.dataset import (get_default_transforms, BaselineSegmentationDataset,
                           collate_curves, _validation_worker_init_fn)
@@ -68,7 +70,6 @@ def _orli_model_kwargs(config, image_size):
 
 @torch.compile()
 def model_step(model,
-               cls_criterion,
                curve_criterion,
                batch,
                teacher_force_anchors: bool = True):
@@ -115,23 +116,20 @@ def model_step(model,
     logits = model(tokens=torch.cat([tokens, curves], dim=-1),
                    encoder_input=batch['image'],
                    target_anchor_idx=target_anchor_idx)
-    losses = None
-    cls_losses = None
     curve_losses = None
     num_cls = logits['tokens'].shape[-1]
+    num_iters = logits['curves'].shape[0]
 
-    for pred_curves, pred_tokens in zip(logits['curves'], logits['tokens']):
-        # filter out ignored indices from predictions
-        pred_tokens = pred_tokens[valid_tokens_mask]
+    # valid targets (computed once)
+    batch_target_cls = target_cls_indices[valid_tokens_mask]
+    batch_target_curves = target_curves[valid_curves_mask]
+
+    # one-hot targets for sigmoid focal loss
+    target_cls_onehot = torch.nn.functional.one_hot(batch_target_cls.reshape(-1),
+                                                     num_cls).to(dtype=logits['tokens'].dtype)
+
+    for pred_curves in logits['curves']:
         pred_curves = pred_curves[valid_curves_mask]
-
-        # valid targets
-        batch_target_cls = target_cls_indices[valid_tokens_mask]
-        batch_target_curves = target_curves[valid_curves_mask]
-
-        cls_loss = cls_criterion(pred_tokens.reshape(-1, num_cls),
-                                 batch_target_cls.reshape(-1))
-        cls_loss = cls_loss / num_token_targets
 
         # sample points from curves
         pred_points = sample_bezier_curve(pred_curves)
@@ -139,15 +137,20 @@ def model_step(model,
         curve_points_loss = curve_criterion(pred_points, target_points) / num_curve_targets
         curve_ctrl_loss = curve_criterion(pred_curves, batch_target_curves) / num_curve_targets
         curve_loss = curve_points_loss + curve_ctrl_loss
-
-        _loss = cls_loss + curve_loss
-        losses = _loss if losses is None else losses + _loss
-        cls_losses = cls_loss if cls_losses is None else cls_losses + cls_loss
         curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
-    num_iters = logits['curves'].shape[0]
-    return (losses / num_iters,
-            cls_losses / num_iters,
-            curve_losses / num_iters)
+
+    # classification loss only at final iteration
+    pred_tokens = logits['tokens'][-1][valid_tokens_mask]
+    cls_loss = sigmoid_focal_loss(pred_tokens.reshape(-1, num_cls),
+                                  target_cls_onehot,
+                                  alpha=0.25,
+                                  gamma=2.0,
+                                  reduction='sum')
+    cls_loss = cls_loss / num_token_targets
+
+    curve_losses = curve_losses / num_iters
+    losses = cls_loss + curve_losses
+    return (losses, cls_loss, curve_losses)
 
 
 class OrliSegmentationDataModule(L.LightningDataModule):
@@ -268,7 +271,6 @@ class OrliSegmentationModel(L.LightningModule):
 
         self.val_cls_mean = MeanMetric()
         self.val_curve_mean = MeanMetric()
-        self.cls_criterion = torch.nn.CrossEntropyLoss(reduction='sum')
         self.curve_criterion = torch.nn.L1Loss(reduction='sum')
         self.test_tolerance = 10.0
         self.test_match_threshold = 0.5
@@ -281,7 +283,6 @@ class OrliSegmentationModel(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         loss, cls_loss, curve_loss = model_step(self.net,
-                                                self.cls_criterion,
                                                 self.curve_criterion,
                                                 batch,
                                                 teacher_force_anchors=True)
@@ -313,7 +314,6 @@ class OrliSegmentationModel(L.LightningModule):
         num_curve_targets = (batch['curves'][..., 1:, 0] != -1).sum().clamp_min(1)
 
         loss, cls_loss, curve_loss = model_step(self.net,
-                                                self.cls_criterion,
                                                 self.curve_criterion,
                                                 batch,
                                                 teacher_force_anchors=getattr(self.hparams.config,
