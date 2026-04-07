@@ -2,11 +2,9 @@
 """
 Computes representative curve anchors from one or more source datasets.
 
-The default strategy is coverage-oriented instead of density-oriented:
-curves are transformed to logit space, robustly scaled, and a greedy k-center
+Curves are transformed to logit space, robustly scaled, and a greedy k-center
 selection is run on the transformed representation. This yields anchors that
-cover the support of the dataset better than plain k-means, which tends to
-collapse onto the most frequent modes.
+cover the support of the dataset better than density-oriented clustering.
 """
 import click
 import numpy as np
@@ -62,20 +60,19 @@ def _coverage_anchors(lines: np.ndarray, num_anchors: int) -> np.ndarray:
     return lines[selected]
 
 
+def _in_bounds_mask(lines: np.ndarray) -> np.ndarray:
+    return np.logical_and(lines >= 0.0, lines <= 1.0).all(axis=1)
+
+
 @click.command()
 @click.option('-n', '--num-anchors', default=5, help='Number of anchors to compute.', show_default=True)
-@click.option('--method',
-              type=click.Choice(['coverage', 'kmeans']),
-              default='coverage',
-              show_default=True,
-              help='Anchor selection strategy.')
 @click.option('-o', '--output',
               default='anchors.json',
               show_default=True,
               type=click.Path(dir_okay=False, writable=True),
               help='Output file for anchors.')
 @click.argument('files', nargs=-1)
-def cli(num_anchors, method, output, files):
+def cli(num_anchors, output, files):
     """
     Computes `n` anchors from one or more binary dataset files and writes them
     to a JSON file.
@@ -104,15 +101,17 @@ def cli(num_anchors, method, output, files):
         raise click.UsageError('No lines found in the provided datasets.')
 
     lines = np.asarray(lines, dtype=np.float32)
+    in_bounds = _in_bounds_mask(lines)
+    num_skipped = int((~in_bounds).sum())
+    if num_skipped:
+        click.echo(f'Skipping {num_skipped} out-of-bounds curves.')
+        lines = lines[in_bounds]
 
-    if method == 'coverage':
-        selected = _coverage_anchors(lines, num_anchors)
-        anchors = [tuple(float(v) for v in row) for row in selected]
-    else:
-        from sklearn.cluster import KMeans
+    if len(lines) == 0:
+        raise click.UsageError('No in-bounds lines remain after filtering.')
 
-        kmeans = KMeans(n_clusters=num_anchors).fit(lines)
-        anchors = [tuple(float(v) for v in row) for row in kmeans.cluster_centers_]
+    selected = _coverage_anchors(lines, num_anchors)
+    anchors = [tuple(float(v) for v in row) for row in selected]
 
     print(f'Anchors: {anchors}')
     with open(output, 'w') as fp:
