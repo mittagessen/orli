@@ -23,6 +23,9 @@ _MODEL_ONLY_KEYS = {'freeze_encoder',
                     'neck_ffn_dim',
                     'neck_dropout',
                     'neck_fusion_depth',
+                    'train_teacher_force_anchors_prob',
+                    'train_teacher_force_anchors_prob_start',
+                    'train_teacher_force_anchors_prob_end',
                     'teacher_force_anchors',
                     'fourier_features',
                     'logit_refinement',
@@ -58,8 +61,21 @@ class OrliSegmentationTrainingConfig(TrainingConfig):
         self.neck_ffn_dim = kwargs.pop('neck_ffn_dim', 1024)
         self.neck_dropout = kwargs.pop('neck_dropout', 0.0)
         self.neck_fusion_depth = kwargs.pop('neck_fusion_depth', 2)
-        # Validation-only switch. Training always uses teacher-forced anchors.
-        self.teacher_force_anchors = kwargs.pop('teacher_force_anchors', True)
+        # Controls how often training uses GT anchor assignments instead of the
+        # model's own first-step anchor predictions. If only
+        # `train_teacher_force_anchors_prob` is set it is treated as a constant
+        # probability. The start/end values enable a linear decay schedule.
+        constant_teacher_force_prob = kwargs.pop('train_teacher_force_anchors_prob', None)
+        self.train_teacher_force_anchors_prob_start = kwargs.pop('train_teacher_force_anchors_prob_start',
+                                                                 1.0 if constant_teacher_force_prob is None else constant_teacher_force_prob)
+        self.train_teacher_force_anchors_prob_end = kwargs.pop('train_teacher_force_anchors_prob_end',
+                                                               self.train_teacher_force_anchors_prob_start)
+        # Backwards-compatible alias for callers that still inspect the old
+        # field name.
+        self.train_teacher_force_anchors_prob = self.train_teacher_force_anchors_prob_start
+        # Validation should default to predicted anchors because inference never
+        # has access to GT anchor assignments.
+        self.teacher_force_anchors = kwargs.pop('teacher_force_anchors', False)
         self.fourier_features = kwargs.pop('fourier_features', True)
         self.logit_refinement = kwargs.pop('logit_refinement', True)
         self.slurm = kwargs.pop('slurm', False)

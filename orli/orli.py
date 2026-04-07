@@ -253,20 +253,28 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         encoder_hidden_states = self.nn['encoder'](encoder_input)
         return self.nn['adapter'](encoder_hidden_states)
 
-    def prepare_for_inference(self, config: OrliSegmentationInferenceConfig):
+    def prepare_for_inference(self, config):
         """
         Configures the model for inference.
+
+        Args:
+            config: An inference configuration object. Works with both
+                    :class:`OrliSegmentationInferenceConfig` and the base
+                    :class:`SegmentationInferenceConfig` (orli-specific
+                    options fall back to defaults in the latter case).
         """
         if self.ready_for_generation:
             logger.debug('Model has already been prepared for generation!')
 
         self.eval()
         self._inf_config = config
-        self._batch_size = self._inf_config.batch_size
+        self._batch_size = config.batch_size
 
-        self._fabric = Fabric(accelerator=self._inf_config.accelerator,
-                              devices=self._inf_config.device,
-                              precision=self._inf_config.precision)
+        max_predicted_lines = getattr(config, 'max_predicted_lines', 768)
+
+        self._fabric = Fabric(accelerator=config.accelerator,
+                              devices=config.device,
+                              precision=config.precision)
 
         self.nn = self._fabric._precision.convert_module(self.nn)
         self.nn = self._fabric.to_device(self.nn)
@@ -278,7 +286,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         # set up caches
         self.setup_caches(batch_size=self._batch_size,
                           encoder_max_seq_len=self._max_encoder_seq_len,
-                          decoder_max_seq_len=self._inf_config.max_predicted_lines,
+                          decoder_max_seq_len=max_predicted_lines,
                           dtype=self.m_dtype)
 
         bos = torch.zeros(12, dtype=self.m_dtype)
@@ -286,10 +294,10 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         self._prompt = self._fabric.to_device(bos.unsqueeze(0).unsqueeze(0).repeat(self._batch_size, 1, 1))
 
         # generate a regular causal mask
-        self._masks = self._fabric.to_device(torch.tril(torch.ones(self._inf_config.max_predicted_lines,
-                                                                   self._inf_config.max_predicted_lines,
+        self._masks = self._fabric.to_device(torch.tril(torch.ones(max_predicted_lines,
+                                                                   max_predicted_lines,
                                                                    dtype=torch.bool).unsqueeze(0)))
-        self._input_pos = self._fabric.to_device(torch.arange(0, self._inf_config.max_predicted_lines).unsqueeze(0))
+        self._input_pos = self._fabric.to_device(torch.arange(0, max_predicted_lines).unsqueeze(0))
 
         self.im_transforms = get_default_transforms(self.user_metadata['image_size'], dtype=self.m_dtype)
 
@@ -326,7 +334,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                                       baseline=baseline,
                                       tags={'type': [{'type': 'default'}]}))
 
-        if self._inf_config.polygonize and lines:
+        if getattr(self._inf_config, 'polygonize', False) and lines:
             from kraken.lib.segmentation import calculate_polygonal_environment
             boundaries = calculate_polygonal_environment(im=im.convert('L'),
                                                          baselines=[list(bl) for bl in baselines])
@@ -393,7 +401,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         # mask used for setting all values from EOS token to pad_id in output sequences.
         eos_token_mask = torch.ones(self._batch_size, 0, dtype=torch.int32, device=curves.device)
 
-        for _ in range(self._inf_config.max_predicted_lines - 1):
+        for _ in range(getattr(self._inf_config, 'max_predicted_lines', 768) - 1):
             # update eos_token_mask if an EOS token was emitted in a previous step
             eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
 

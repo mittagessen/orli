@@ -49,6 +49,20 @@ if TYPE_CHECKING:
     from os import PathLike
 
 
+def _scheduled_teacher_force_prob(config, trainer) -> float:
+    start = float(getattr(config,
+                          'train_teacher_force_anchors_prob_start',
+                          getattr(config, 'train_teacher_force_anchors_prob', 1.0)))
+    end = float(getattr(config, 'train_teacher_force_anchors_prob_end', start))
+
+    total_steps = getattr(trainer, 'estimated_stepping_batches', None)
+    if not total_steps or total_steps <= 1:
+        return end
+
+    progress = min(max(float(trainer.global_step) / float(total_steps - 1), 0.0), 1.0)
+    return start + (end - start) * progress
+
+
 def _orli_model_kwargs(config, image_size):
     return {'image_size': image_size,
             'anchors': config.anchors,
@@ -139,14 +153,20 @@ def model_step(model,
         curve_loss = curve_points_loss + curve_ctrl_loss
         curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
 
-    # classification loss only at final iteration
-    pred_tokens = logits['tokens'][-1][valid_tokens_mask]
-    cls_loss = sigmoid_focal_loss(pred_tokens.reshape(-1, num_cls),
-                                  target_cls_onehot,
-                                  alpha=0.25,
-                                  gamma=2.0,
-                                  reduction='sum')
-    cls_loss = cls_loss / num_token_targets
+    # Supervise all classifier heads. The first-step classifier chooses the
+    # initial anchor at inference time and otherwise would remain unsupervised
+    # when anchors are teacher-forced during training.
+    cls_loss = None
+    for pred_tokens in logits['tokens']:
+        pred_tokens = pred_tokens[valid_tokens_mask]
+        step_cls_loss = sigmoid_focal_loss(pred_tokens.reshape(-1, num_cls),
+                                           target_cls_onehot,
+                                           alpha=0.25,
+                                           gamma=2.0,
+                                           reduction='sum')
+        step_cls_loss = step_cls_loss / num_token_targets
+        cls_loss = step_cls_loss if cls_loss is None else cls_loss + step_cls_loss
+    cls_loss = cls_loss / logits['tokens'].shape[0]
 
     curve_losses = curve_losses / num_iters
     losses = cls_loss + curve_losses
@@ -282,10 +302,20 @@ class OrliSegmentationModel(L.LightningModule):
         return self.model(pixel_values=x)
 
     def training_step(self, batch, batch_idx):
+        teacher_force_prob = _scheduled_teacher_force_prob(self.hparams.config,
+                                                           self.trainer)
+        teacher_force_anchors = bool(torch.rand(()) < teacher_force_prob)
         loss, cls_loss, curve_loss = model_step(self.net,
                                                 self.curve_criterion,
                                                 batch,
-                                                teacher_force_anchors=True)
+                                                teacher_force_anchors=teacher_force_anchors)
+        self.log('train_teacher_force_anchor_prob',
+                 teacher_force_prob,
+                 batch_size=batch['tokens'].shape[0],
+                 on_step=True,
+                 on_epoch=False,
+                 prog_bar=False,
+                 logger=True)
         self.log('train_loss',
                  loss,
                  batch_size=batch['tokens'].shape[0],
