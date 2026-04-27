@@ -7,17 +7,17 @@ train:
     - /home/bkiessling/orli_train.lst
   evaluation_data:
     - /home/bkiessling/orli_val.lst
-  checkpoint_path: /home/bkiessling/experiments/orli_hybrid_neck_tiny_coarse
+  checkpoint_path: /home/bkiessling/experiments/orli_hybrid_neck_pico_coarse
   optimizer: AdamW
   epochs: 24
-  lrate: 5e-4
+  lrate: 6e-4
   schedule: cosine
   cos_t_max: 24
   cos_min_lr: 5e-6
-  warmup: 1000
+  warmup: 800
   augment: true
-  batch_size: 12
+  batch_size: 16
   val_batch_size: 16
-  accumulate_grad_batches: 12
+  accumulate_grad_batches: 8
   pl_logger: wandb
-  model_variant: tiny
+  model_variant: pico

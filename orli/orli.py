@@ -25,8 +25,8 @@ from lightning.fabric import Fabric
 from typing import Optional, Any, Union
 from collections.abc import Generator
 
-from orli.configs import OrliSegmentationInferenceConfig
-from orli.fusion import baseline_decoder, OrliAdapter, OrliHybridNeck, CurveRegressionHead
+from orli.configs import OrliSegmentationInferenceConfig, MODEL_VARIANTS
+from orli.fusion import baseline_decoder, OrliHybridNeck, CurveRegressionHead
 from orli.dataset import get_default_transforms
 from orli.modules.bezier import sample_bezier_curve
 
@@ -55,28 +55,43 @@ class OrliModel(nn.Module, SegmentationBaseModel):
     def __init__(self, **kwargs):
         super().__init__()
 
+        if (config := kwargs.get('config', None)) is None:
+            raise ValueError('config argument is missing in args.')
+        if hasattr(config, '__dict__'):
+            config = {'anchors': config.anchors,
+                      'model_variant': config.model_variant}
+        config = dict(config)
+
+        model_variant = config.get('model_variant', 'tiny')
+        if model_variant not in MODEL_VARIANTS:
+            choices = ', '.join(MODEL_VARIANTS)
+            raise ValueError(f'Unknown model_variant {model_variant!r}. Choices: {choices}')
+        metadata = dict(kwargs)
+        metadata['config'] = config
+        kwargs = {**kwargs, **config, **MODEL_VARIANTS[model_variant]}
+
         if (image_size := kwargs.get('image_size', None)) is None:
             raise ValueError('image_size argument is missing in args.')
 
-        if (anchors := kwargs.get('anchors', None)) is None:
-            raise ValueError('anchors argument is missing in args.')
+        if (anchors := config.get('anchors', None)) is None:
+            raise ValueError('anchors argument is missing in config.')
 
-        encoder_name = kwargs.get('encoder_name', 'convnextv2_tiny')
-        encoder_idxs = list(kwargs.get('encoder_idxs', (1, 2, 3)))
-        neck_type = kwargs.get('neck_type', 'simple')
-        neck_num_layers = kwargs.get('neck_num_layers', 1)
-        neck_num_heads = kwargs.get('neck_num_heads', 8)
-        neck_hidden_dim = kwargs.get('neck_hidden_dim', 256)
-        neck_use_encoder_idx = kwargs.get('neck_use_encoder_idx', None)
-        neck_output_ds_factors = kwargs.get('neck_output_ds_factors', None)
-        neck_norm = kwargs.get('neck_norm', 'group')
-        neck_ffn_dim = kwargs.get('neck_ffn_dim', 1024)
-        neck_dropout = kwargs.get('neck_dropout', 0.0)
-        neck_fusion_depth = kwargs.get('neck_fusion_depth', 2)
+        encoder_name = kwargs['encoder_name']
+        encoder_idxs = list(kwargs['encoder_idxs'])
+        neck_num_layers = kwargs['neck_num_layers']
+        neck_num_heads = kwargs['neck_num_heads']
+        neck_hidden_dim = kwargs['neck_hidden_dim']
+        neck_use_encoder_idx = kwargs['neck_use_encoder_idx']
+        neck_output_ds_factors = kwargs['neck_output_ds_factors']
+        neck_norm = kwargs['neck_norm']
+        neck_ffn_dim = kwargs['neck_ffn_dim']
+        neck_dropout = kwargs['neck_dropout']
+        neck_fusion_depth = kwargs['neck_fusion_depth']
 
-        self.user_metadata: dict[str, Any] = {'accuracy': [],
+        self.user_metadata: dict[str, Any] = {'model_type': self.model_type,
+                                               'accuracy': [],
                                                'metrics': []}
-        self.user_metadata.update(kwargs)
+        self.user_metadata.update(metadata)
 
         logger.info('Creating segmentation model')
 
@@ -89,39 +104,24 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                           int(image_size[1]/encoder_model.feature_info.reduction(idx)),
                           encoder_model.feature_info.channels(idx)) for idx in encoder_idxs]
 
-        if neck_type == 'simple':
-            adapter = OrliAdapter(neck_num_layers,
-                                  neck_num_heads,
-                                  encoder_embed_dims=[x[2] for x in encoder_sizes],
-                                  encoder_sizes=[x[:2] for x in encoder_sizes],
-                                  decoder_embed_dim=576,
-                                  ds_factors=neck_output_ds_factors)
-        elif neck_type == 'hybrid':
-            adapter = OrliHybridNeck(encoder_embed_dims=[x[2] for x in encoder_sizes],
-                                     encoder_sizes=[x[:2] for x in encoder_sizes],
-                                     decoder_embed_dim=576,
-                                     hidden_dim=neck_hidden_dim,
-                                     num_heads=neck_num_heads,
-                                     num_encoder_layers=neck_num_layers,
-                                     use_encoder_idx=neck_use_encoder_idx,
-                                     output_ds_factors=neck_output_ds_factors,
-                                     norm_type=neck_norm,
-                                     dim_feedforward=neck_ffn_dim,
-                                     dropout=neck_dropout,
-                                     fusion_depth=neck_fusion_depth)
-        else:
-            raise ValueError(f'Unknown neck_type {neck_type}')
+        adapter = OrliHybridNeck(encoder_embed_dims=[x[2] for x in encoder_sizes],
+                                 encoder_sizes=[x[:2] for x in encoder_sizes],
+                                 decoder_embed_dim=576,
+                                 hidden_dim=neck_hidden_dim,
+                                 num_heads=neck_num_heads,
+                                 num_encoder_layers=neck_num_layers,
+                                 use_encoder_idx=neck_use_encoder_idx,
+                                 output_ds_factors=neck_output_ds_factors,
+                                 norm_type=neck_norm,
+                                 dim_feedforward=neck_ffn_dim,
+                                 dropout=neck_dropout,
+                                 fusion_depth=neck_fusion_depth)
 
-        fourier_features = kwargs.get('fourier_features', True)
-        logit_refinement = kwargs.get('logit_refinement', True)
-
-        decoder_model = baseline_decoder(encoder_sizes=adapter.output_sizes,
-                                         fourier_features=fourier_features)
+        decoder_model = baseline_decoder(encoder_sizes=adapter.output_sizes)
 
         curve_reg = CurveRegressionHead(embed_dim=decoder_model.tok_embeddings.embed_dim,
                                         num_iterations=len(decoder_model.output_hidden_states) + 1,
-                                        anchors=anchors,
-                                        logit_refinement=logit_refinement)
+                                        anchors=anchors)
 
         self.nn = nn.ModuleDict({'encoder': encoder_model,
                                  'decoder': decoder_model,
@@ -268,7 +268,6 @@ class OrliModel(nn.Module, SegmentationBaseModel):
 
         self.eval()
         self._inf_config = config
-        self._batch_size = config.batch_size
 
         max_predicted_lines = getattr(config, 'max_predicted_lines', 768)
 
@@ -283,15 +282,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
 
         self._max_encoder_seq_len = sum(h * w for h, w in self.nn['adapter'].output_sizes)
 
-        # set up caches
-        self.setup_caches(batch_size=self._batch_size,
-                          encoder_max_seq_len=self._max_encoder_seq_len,
-                          decoder_max_seq_len=max_predicted_lines,
-                          dtype=self.m_dtype)
-
-        bos = torch.zeros(12, dtype=self.m_dtype)
-        bos[self.bos_id] = 1.0
-        self._prompt = self._fabric.to_device(bos.unsqueeze(0).unsqueeze(0).repeat(self._batch_size, 1, 1))
+        self._resize_generation_state(config.batch_size)
 
         # generate a regular causal mask
         self._masks = self._fabric.to_device(torch.tril(torch.ones(max_predicted_lines,
@@ -302,6 +293,18 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         self.im_transforms = get_default_transforms(self.user_metadata['image_size'], dtype=self.m_dtype)
 
         self.ready_for_generation = True
+
+    def _resize_generation_state(self, batch_size: int) -> None:
+        max_predicted_lines = getattr(self._inf_config, 'max_predicted_lines', 768)
+        self._batch_size = batch_size
+        self.setup_caches(batch_size=self._batch_size,
+                          encoder_max_seq_len=self._max_encoder_seq_len,
+                          decoder_max_seq_len=max_predicted_lines,
+                          dtype=self.m_dtype)
+
+        bos = torch.zeros(12, dtype=self.m_dtype)
+        bos[self.bos_id] = 1.0
+        self._prompt = self._fabric.to_device(bos.unsqueeze(0).unsqueeze(0).repeat(self._batch_size, 1, 1))
 
     @torch.inference_mode()
     def predict(self, im: 'Image.Image') -> 'Segmentation':
@@ -366,7 +369,10 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         """
         logger.info('Computing encoder embeddings')
 
-        if self.caches_are_setup():
+        batch_size = encoder_input.size(0)
+        if batch_size != self._batch_size:
+            self._resize_generation_state(batch_size)
+        elif self.caches_are_setup():
             self.reset_caches()
 
         encoder_hidden_states = self.forward_encoder_embeddings(encoder_input)
@@ -409,9 +415,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
             curr_masks = self._masks[:, curr_pos, None, :]
 
             # no need for encoder embeddings anymore as they're in the cache now
-            # clamp anchor-specific LINE tokens back to generic LINE for input one-hot
-            input_token_cls = tokens.squeeze(-1).clamp(max=3)
-            input_tok = F.one_hot(input_token_cls, num_classes=4).to(device=encoder_hidden_states.device)
+            input_tok = F.one_hot(tokens.squeeze(-1), num_classes=4).to(device=encoder_hidden_states.device)
             logits = self.forward(tokens=torch.cat([input_tok.unsqueeze(1),
                                                     curves.unsqueeze(1)], dim=-1),
                                   mask=curr_masks,

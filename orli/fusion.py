@@ -95,7 +95,6 @@ def baseline_decoder(vocab_size: int = 12,
                      rope_base: int = 10000,
                      encoder_sizes: list[tuple[int, int]] = None,  # start of fusion parameters
                      pretrained: Optional[str] = None,
-                     fourier_features: bool = True,
                      **kwargs) -> TransformerDecoder:
     """
     Builds a decoder regressing baselines as cubic Bézier curves using
@@ -210,7 +209,7 @@ def baseline_decoder(vocab_size: int = 12,
     line_embeddings = CurveTokenEmbedding(token_dim=token_dim,
                                           curve_dim=curve_dim,
                                           embed_dim=config['embed_dim'],
-                                          num_curve_freqs=4 if fourier_features else 0)
+                                          num_curve_freqs=4)
 
     decoder = TransformerDecoder(tok_embeddings=line_embeddings,
                                  layers=layers,
@@ -656,41 +655,50 @@ class CurveRegressionHead(nn.Module):
     Uses sigmoid/inverse-sigmoid refinement: offsets are predicted in logit
     space and combined with the previous iteration's curves via inverse
     sigmoid, addition, and sigmoid. This ensures outputs stay in [0,1] and
-    provides better gradient flow near boundaries.
+    provides better gradient flow near boundaries. Each refinement step
+    conditions its offset prediction on the decoder state, the selected
+    anchor identity, and the current curve state.
     """
 
     def __init__(self,
                  anchors: tuple[tuple[float, ...], ...],
                  embed_dim: int = 576,
                  num_layers: int = 3,
-                 num_iterations: int = 4,
-                 logit_refinement: bool = True):
+                 num_iterations: int = 4):
         super().__init__()
-        self.logit_refinement = logit_refinement
         if isinstance(anchors, torch.Tensor):
             anchors_t = anchors.float()
         else:
             anchors_t = torch.tensor(anchors, dtype=torch.float32)
         self.num_anchors = anchors_t.shape[0]
-        num_cls = 3 + self.num_anchors
+        num_cls = 4
+        reg_hidden_dim = scale_hidden_dim_for_mlp(embed_dim)
 
         reg_proj = nn.Sequential()
-        if logit_refinement:
-            self.register_buffer('curve_anchors', anchors_t.clamp(1e-5, 1 - 1e-5))
-        else:
-            self.register_buffer('curve_anchors', anchors_t)
+        self.register_buffer('curve_anchors', anchors_t.clamp(1e-5, 1 - 1e-5))
 
         self.norms = nn.ModuleList([RMSNorm(embed_dim) for _ in range(num_iterations)])
 
         if num_layers > 1:
             for n in range(num_layers-1):
-                reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if n else embed_dim, scale_hidden_dim_for_mlp(embed_dim)))
+                reg_proj.append(nn.Linear(reg_hidden_dim if n else embed_dim, reg_hidden_dim))
                 reg_proj.append(nn.SiLU())
-        reg_proj.append(nn.Linear(scale_hidden_dim_for_mlp(embed_dim) if num_layers > 1 else embed_dim, 8))
+        reg_proj.append(nn.Linear(reg_hidden_dim if num_layers > 1 else embed_dim, 8))
         # zero-initialize the final layer for near-zero initial offsets
         nn.init.zeros_(reg_proj[-1].weight)
         nn.init.zeros_(reg_proj[-1].bias)
         cls_proj = nn.Linear(embed_dim, num_cls)
+        reg_input_proj = nn.Linear(embed_dim * 3, embed_dim)
+        nn.init.zeros_(reg_input_proj.bias)
+        with torch.no_grad():
+            reg_input_proj.weight.zero_()
+            reg_input_proj.weight[:, :embed_dim].copy_(torch.eye(embed_dim,
+                                                                 dtype=reg_input_proj.weight.dtype))
+            reg_input_proj.weight[:, embed_dim:].normal_(std=1e-3)
+        self.anchor_proj = nn.Linear(embed_dim, self.num_anchors)
+        self.anchor_embeddings = nn.Embedding(self.num_anchors, embed_dim)
+        self.curve_state_proj = nn.Linear(8, embed_dim, bias=False)
+        self.reg_input_projs = _get_clones(reg_input_proj, num_iterations)
         self.reg_projs = _get_clones(reg_proj, num_iterations)
         self.cls_projs = _get_clones(cls_proj, num_iterations)
 
@@ -708,33 +716,38 @@ class CurveRegressionHead(nn.Module):
         Returns:
             A dictionary containing an output tensor with shape ``[num_iterations, b, s, 8]``
             under the key `curves` and the class logits in `tokens` with shape
-            ``[num_iterations, b, s, num_cls]``.
+            ``[num_iterations, b, s, 4]``. The first-step anchor logits are
+            returned under `anchors` with shape ``[b, s, num_anchors]``.
         """
-        batch_size, seq_len, _ = xs[0].shape
-
-        # anchor selection: use first iteration's cls_proj to pick per-token anchor
-        if self.num_anchors > 1:
-            if target_anchor_idx is not None:
-                anchor_idx = target_anchor_idx.clamp(min=0, max=self.num_anchors - 1)
-            else:
-                h0 = self.norms[0](xs[0])
-                anchor_logits = self.cls_projs[0](h0)          # [b, s, 3+N]
-                anchor_idx = anchor_logits[..., 3:].argmax(-1)  # [b, s]
-            init_curves = self.curve_anchors[anchor_idx]  # [b, s, 8]
+        # anchor selection: use a dedicated first-step anchor head to pick the
+        # per-token initialization anchor without overloading the token logits.
+        h0 = self.norms[0](xs[0])
+        anchor_logits = self.anchor_proj(h0)  # [b, s, N]
+        if target_anchor_idx is not None:
+            anchor_idx = target_anchor_idx.clamp(min=0, max=self.num_anchors - 1)
         else:
-            init_curves = self.curve_anchors.unsqueeze(0).expand(batch_size, seq_len, -1)
+            anchor_idx = anchor_logits.argmax(-1)  # [b, s]
+        init_curves = self.curve_anchors[anchor_idx]  # [b, s, 8]
+        anchor_cond = self.anchor_embeddings(anchor_idx)
 
         _curves: list[torch.Tensor] = [init_curves]
         _logits: list[torch.Tensor] = []
-        for norm, cls_proj, reg_proj, layer in zip(self.norms, self.cls_projs, self.reg_projs, xs):
+        for norm, cls_proj, reg_input_proj, reg_proj, layer in zip(self.norms,
+                                                                   self.cls_projs,
+                                                                   self.reg_input_projs,
+                                                                   self.reg_projs,
+                                                                   xs):
             curves = _curves[-1]
             layer = norm(layer)
-            offsets = reg_proj(layer)
-            if self.logit_refinement:
-                _curves.append(torch.sigmoid(inverse_sigmoid(curves) + offsets))
-            else:
-                _curves.append(curves + offsets)
+            curve_state = inverse_sigmoid(curves)
+            reg_input = torch.cat([layer,
+                                   anchor_cond,
+                                   self.curve_state_proj(curve_state)],
+                                  dim=-1)
+            offsets = reg_proj(reg_input_proj(reg_input))
+            _curves.append(torch.sigmoid(inverse_sigmoid(curves) + offsets))
             _logits.append(cls_proj(layer))
 
         return {'curves': torch.stack(_curves[1:]),
-                'tokens': torch.stack(_logits)}
+                'tokens': torch.stack(_logits),
+                'anchors': anchor_logits}

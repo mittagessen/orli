@@ -122,10 +122,10 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               type=click.Choice(['binary']),
               help='Sets the training data format.')
 @click.option('-is', '--image-size', type=(int, int), help='Network input image size.')
+@click.option('--model-variant',
+              type=click.Choice(['pico', 'tiny', 'small']),
+              help='Model size preset to train.')
 @click.option('--augment/--no-augment', help='Enable image augmentation')
-@click.option('--teacher-force-anchors/--no-teacher-force-anchors',
-              default=True,
-              help='Use nearest GT anchor IDs to initialize multi-anchor curve regression during validation.')
 @click.option('--logger',
               'pl_logger',
               type=click.Choice(['tensorboard', 'wandb']),
@@ -256,7 +256,9 @@ def train(ctx, **kwargs):
         if load:
             message(f'Loading from checkpoint {load}.')
             if load.endswith('ckpt'):
-                model = OrliSegmentationModel.load_from_checkpoint(load, config=m_config)
+                model = OrliSegmentationModel.load_from_checkpoint(load,
+                                                                   config=m_config,
+                                                                   weights_only=False)
             else:
                 model = OrliSegmentationModel.load_from_weights(load, config=m_config)
         elif resume:

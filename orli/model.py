@@ -49,44 +49,57 @@ if TYPE_CHECKING:
     from os import PathLike
 
 
-def _scheduled_teacher_force_prob(config, trainer) -> float:
-    start = float(getattr(config,
-                          'train_teacher_force_anchors_prob_start',
-                          getattr(config, 'train_teacher_force_anchors_prob', 1.0)))
-    end = float(getattr(config, 'train_teacher_force_anchors_prob_end', start))
-
-    total_steps = getattr(trainer, 'estimated_stepping_batches', None)
-    if not total_steps or total_steps <= 1:
-        return end
-
-    progress = min(max(float(trainer.global_step) / float(total_steps - 1), 0.0), 1.0)
-    return start + (end - start) * progress
-
-
 def _orli_model_kwargs(config, image_size):
-    return {'image_size': image_size,
-            'anchors': config.anchors,
-            'fourier_features': getattr(config, 'fourier_features', True),
-            'logit_refinement': getattr(config, 'logit_refinement', True),
-            'encoder_name': getattr(config, 'encoder_name', 'convnextv2_tiny'),
-            'encoder_idxs': getattr(config, 'encoder_idxs', (1, 2, 3)),
-            'neck_type': getattr(config, 'neck_type', 'simple'),
-            'neck_num_layers': getattr(config, 'neck_num_layers', 1),
-            'neck_num_heads': getattr(config, 'neck_num_heads', 8),
-            'neck_hidden_dim': getattr(config, 'neck_hidden_dim', 256),
-            'neck_use_encoder_idx': getattr(config, 'neck_use_encoder_idx', None),
-            'neck_output_ds_factors': getattr(config, 'neck_output_ds_factors', None),
-            'neck_norm': getattr(config, 'neck_norm', 'group'),
-            'neck_ffn_dim': getattr(config, 'neck_ffn_dim', 1024),
-            'neck_dropout': getattr(config, 'neck_dropout', 0.0),
-            'neck_fusion_depth': getattr(config, 'neck_fusion_depth', 2)}
+    return {'config': _orli_serialized_config(config),
+            'image_size': image_size}
+
+
+def _orli_serialized_config(config):
+    return {'anchors': config.anchors,
+            'model_variant': config.model_variant}
+
+
+def _nearest_anchor_idx_by_geometry(curves: torch.Tensor,
+                                    anchor_table: torch.Tensor,
+                                    num_samples: int = 20) -> torch.Tensor:
+    curve_points = sample_bezier_curve(curves, num_samples=num_samples).flatten(1)
+    anchor_points = sample_bezier_curve(anchor_table, num_samples=num_samples).flatten(1)
+    dists = torch.cdist(curve_points, anchor_points, p=1)
+    return dists.argmin(dim=-1)
+
+
+def _focal_loss_from_indices(logits: torch.Tensor,
+                             target_indices: torch.Tensor,
+                             num_classes: int,
+                             normalizer: torch.Tensor) -> torch.Tensor:
+    target_onehot = torch.nn.functional.one_hot(target_indices.reshape(-1),
+                                                num_classes).to(dtype=logits.dtype)
+    loss = sigmoid_focal_loss(logits.reshape(-1, num_classes),
+                              target_onehot,
+                              alpha=0.25,
+                              gamma=2.0,
+                              reduction='sum')
+    return loss / normalizer
+
+
+def _focal_ce_loss_from_indices(logits: torch.Tensor,
+                                target_indices: torch.Tensor,
+                                num_classes: int,
+                                normalizer: torch.Tensor,
+                                gamma: float = 2.0) -> torch.Tensor:
+    flat_logits = logits.reshape(-1, num_classes)
+    flat_targets = target_indices.reshape(-1)
+    log_probs = torch.nn.functional.log_softmax(flat_logits, dim=-1)
+    target_log_probs = log_probs.gather(-1, flat_targets.unsqueeze(-1)).squeeze(-1)
+    focal_weight = (1.0 - target_log_probs.exp()).pow(gamma)
+    loss = -(focal_weight * target_log_probs).sum()
+    return loss / normalizer
 
 
 @torch.compile()
 def model_step(model,
                curve_criterion,
-               batch,
-               teacher_force_anchors: bool = True):
+               batch):
 
     tokens = batch['tokens']
     curves = batch['curves']
@@ -106,21 +119,22 @@ def model_step(model,
     num_token_targets = valid_tokens_mask.sum().clamp_min(1)
     num_curve_targets = valid_curves_mask.sum().clamp_min(1)
 
-    # precompute target class indices, remapping LINE tokens for multi-anchor
+    # precompute target class indices. Anchor supervision is handled by a
+    # dedicated anchor head and no longer overloads the token vocabulary.
     target_cls_indices = target_tokens.argmax(dim=-1)  # [b, s]
+    regressor = model.nn['regressor']
+    if regressor.num_anchors <= 1:
+        raise RuntimeError('model_step expects multi-anchor training with anchor supervision enabled.')
+
     target_anchor_idx = None
-    if model.nn['regressor'].num_anchors > 1:
-        anchor_table = model.nn['regressor'].curve_anchors  # [num_anchors, 8]
-        valid_gt = target_curves[valid_curves_mask]  # [M, 8]
-        full_anchor_idx = torch.full_like(target_cls_indices, -1)
-        if valid_gt.numel():
-            dists = (valid_gt.unsqueeze(1) - anchor_table.unsqueeze(0)).abs().sum(-1)  # [M, N]
-            nearest = dists.argmin(dim=-1)  # [M]
-            full_anchor_idx[valid_curves_mask] = nearest
-        line_mask = target_cls_indices == 3
-        target_cls_indices[line_mask] = 3 + full_anchor_idx[line_mask].clamp(min=0)
-        if teacher_force_anchors:
-            target_anchor_idx = full_anchor_idx
+    line_anchor_mask = valid_curves_mask & (target_cls_indices == 3)
+    num_anchor_targets = line_anchor_mask.sum().clamp_min(1)
+    anchor_table = regressor.curve_anchors  # [num_anchors, 8]
+    full_anchor_idx = torch.full_like(target_cls_indices, -1)
+    valid_gt = target_curves[line_anchor_mask]  # [M, 8]
+    nearest = _nearest_anchor_idx_by_geometry(valid_gt, anchor_table)
+    full_anchor_idx[line_anchor_mask] = nearest
+    target_anchor_idx = full_anchor_idx
 
     # our tokens already contain BOS/EOS tokens so we just run it
     # through the model after replacing ignored indices.
@@ -133,14 +147,11 @@ def model_step(model,
     curve_losses = None
     num_cls = logits['tokens'].shape[-1]
     num_iters = logits['curves'].shape[0]
+    final_curve_loss = None
 
     # valid targets (computed once)
     batch_target_cls = target_cls_indices[valid_tokens_mask]
     batch_target_curves = target_curves[valid_curves_mask]
-
-    # one-hot targets for sigmoid focal loss
-    target_cls_onehot = torch.nn.functional.one_hot(batch_target_cls.reshape(-1),
-                                                     num_cls).to(dtype=logits['tokens'].dtype)
 
     for pred_curves in logits['curves']:
         pred_curves = pred_curves[valid_curves_mask]
@@ -152,25 +163,31 @@ def model_step(model,
         curve_ctrl_loss = curve_criterion(pred_curves, batch_target_curves) / num_curve_targets
         curve_loss = curve_points_loss + curve_ctrl_loss
         curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
+        final_curve_loss = curve_loss
 
-    # Supervise all classifier heads. The first-step classifier chooses the
-    # initial anchor at inference time and otherwise would remain unsupervised
-    # when anchors are teacher-forced during training.
+    # Supervise all token classifier heads over the original BOS/EOS/LINE
+    # vocabulary. Anchor identity is handled by a separate anchor head.
     cls_loss = None
     for pred_tokens in logits['tokens']:
         pred_tokens = pred_tokens[valid_tokens_mask]
-        step_cls_loss = sigmoid_focal_loss(pred_tokens.reshape(-1, num_cls),
-                                           target_cls_onehot,
-                                           alpha=0.25,
-                                           gamma=2.0,
-                                           reduction='sum')
-        step_cls_loss = step_cls_loss / num_token_targets
+        step_cls_loss = _focal_ce_loss_from_indices(pred_tokens,
+                                                    batch_target_cls,
+                                                    num_cls,
+                                                    num_token_targets)
         cls_loss = step_cls_loss if cls_loss is None else cls_loss + step_cls_loss
     cls_loss = cls_loss / logits['tokens'].shape[0]
 
+    anchor_logits = logits['anchors']
+    batch_anchor_targets = full_anchor_idx[line_anchor_mask]
+    batch_anchor_logits = anchor_logits[line_anchor_mask]
+    anchor_loss = _focal_loss_from_indices(batch_anchor_logits,
+                                           batch_anchor_targets,
+                                           regressor.num_anchors,
+                                           num_anchor_targets)
+
     curve_losses = curve_losses / num_iters
-    losses = cls_loss + curve_losses
-    return (losses, cls_loss, curve_losses)
+    losses = cls_loss + curve_losses + anchor_loss
+    return (losses, cls_loss, curve_losses, final_curve_loss, anchor_loss)
 
 
 class OrliSegmentationDataModule(L.LightningDataModule):
@@ -291,6 +308,8 @@ class OrliSegmentationModel(L.LightningModule):
 
         self.val_cls_mean = MeanMetric()
         self.val_curve_mean = MeanMetric()
+        self.val_final_curve_mean = MeanMetric()
+        self.val_anchor_mean = MeanMetric()
         self.curve_criterion = torch.nn.L1Loss(reduction='sum')
         self.test_tolerance = 10.0
         self.test_match_threshold = 0.5
@@ -302,20 +321,9 @@ class OrliSegmentationModel(L.LightningModule):
         return self.model(pixel_values=x)
 
     def training_step(self, batch, batch_idx):
-        teacher_force_prob = _scheduled_teacher_force_prob(self.hparams.config,
-                                                           self.trainer)
-        teacher_force_anchors = bool(torch.rand(()) < teacher_force_prob)
-        loss, cls_loss, curve_loss = model_step(self.net,
-                                                self.curve_criterion,
-                                                batch,
-                                                teacher_force_anchors=teacher_force_anchors)
-        self.log('train_teacher_force_anchor_prob',
-                 teacher_force_prob,
-                 batch_size=batch['tokens'].shape[0],
-                 on_step=True,
-                 on_epoch=False,
-                 prog_bar=False,
-                 logger=True)
+        loss, cls_loss, curve_loss, final_curve_loss, anchor_loss = model_step(self.net,
+                                                                               self.curve_criterion,
+                                                                               batch)
         self.log('train_loss',
                  loss,
                  batch_size=batch['tokens'].shape[0],
@@ -337,28 +345,48 @@ class OrliSegmentationModel(L.LightningModule):
                  on_epoch=False,
                  prog_bar=True,
                  logger=True)
+        self.log('train_final_curve_loss',
+                 final_curve_loss,
+                 batch_size=batch['tokens'].shape[0],
+                 on_step=True,
+                 on_epoch=False,
+                 prog_bar=False,
+                 logger=True)
+        self.log('train_anchor_loss',
+                 anchor_loss,
+                 batch_size=batch['tokens'].shape[0],
+                 on_step=True,
+                 on_epoch=False,
+                 prog_bar=False,
+                 logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         num_token_targets = (batch['tokens'][..., 1:, 0] != -1).sum().clamp_min(1)
         num_curve_targets = (batch['curves'][..., 1:, 0] != -1).sum().clamp_min(1)
+        num_anchor_targets = (batch['tokens'][..., 1:, 3] == 1).sum().clamp_min(1)
 
-        loss, cls_loss, curve_loss = model_step(self.net,
-                                                self.curve_criterion,
-                                                batch,
-                                                teacher_force_anchors=getattr(self.hparams.config,
-                                                                              'teacher_force_anchors',
-                                                                              True))
+        loss, cls_loss, curve_loss, final_curve_loss, anchor_loss = model_step(self.net,
+                                                                                self.curve_criterion,
+                                                                                batch)
         self.val_cls_mean.update(cls_loss.detach(),
                                  weight=num_token_targets.to(device=cls_loss.device, dtype=cls_loss.dtype))
         self.val_curve_mean.update(curve_loss.detach(),
                                    weight=num_curve_targets.to(device=curve_loss.device, dtype=curve_loss.dtype))
+        self.val_final_curve_mean.update(final_curve_loss.detach(),
+                                         weight=num_curve_targets.to(device=final_curve_loss.device,
+                                                                     dtype=final_curve_loss.dtype))
+        self.val_anchor_mean.update(anchor_loss.detach(),
+                                    weight=num_anchor_targets.to(device=anchor_loss.device,
+                                                                 dtype=anchor_loss.dtype))
         return loss
 
     def on_validation_epoch_end(self):
         if not self.trainer.sanity_checking:
             val_cls_loss = self.val_cls_mean.compute()
             val_curve_loss = self.val_curve_mean.compute()
+            val_final_curve_loss = self.val_final_curve_mean.compute()
+            val_anchor_loss = self.val_anchor_mean.compute()
             self.log('val_cls_loss',
                      val_cls_loss,
                      on_step=False,
@@ -373,8 +401,22 @@ class OrliSegmentationModel(L.LightningModule):
                      prog_bar=True,
                      logger=True,
                      sync_dist=True)
+            self.log('val_final_curve_loss',
+                     val_final_curve_loss,
+                     on_step=False,
+                     on_epoch=True,
+                     prog_bar=True,
+                     logger=True,
+                     sync_dist=True)
+            self.log('val_anchor_loss',
+                     val_anchor_loss,
+                     on_step=False,
+                     on_epoch=True,
+                     prog_bar=False,
+                     logger=True,
+                     sync_dist=True)
             self.log('val_metric',
-                     val_cls_loss + val_curve_loss,
+                     val_cls_loss + val_final_curve_loss + val_anchor_loss,
                      on_step=False,
                      on_epoch=True,
                      prog_bar=True,
@@ -383,6 +425,8 @@ class OrliSegmentationModel(L.LightningModule):
             self.log('global_step', self.global_step, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
         self.val_cls_mean.reset()
         self.val_curve_mean.reset()
+        self.val_final_curve_mean.reset()
+        self.val_anchor_mean.reset()
 
     def configure_test(self, test_config: OrliSegmentationTestConfig):
         self._test_config = test_config
@@ -469,7 +513,7 @@ class OrliSegmentationModel(L.LightningModule):
     @classmethod
     def load_from_weights(cls,
                           path: Union[str, 'PathLike'],
-                          config: OrliSegmentationTrainingConfig) -> 'OrliSegmentationModel':
+                          config: Optional[OrliSegmentationTrainingConfig] = None) -> 'OrliSegmentationModel':
         """
         Initializes the module from a model weights file.
         """
@@ -483,6 +527,14 @@ class OrliSegmentationModel(L.LightningModule):
                 break
         if model is None:
             raise ValueError('No OrliModel found in weights file.')
+        model_config = model.user_metadata.get('config')
+        if not isinstance(model_config, dict):
+            raise ValueError('OrliModel weights do not contain a valid model configuration.')
+        if config is None:
+            config = OrliSegmentationTrainingConfig(**model_config)
+        else:
+            for key, value in model_config.items():
+                setattr(config, key, value)
         return cls(config=config, model=model)
 
     def configure_callbacks(self):

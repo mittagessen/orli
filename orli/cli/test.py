@@ -72,8 +72,7 @@ def test(ctx, **kwargs):
     from rich.console import Console
     from lightning.pytorch.callbacks import RichProgressBar
 
-    from orli.configs import (OrliSegmentationTrainingConfig,
-                              OrliSegmentationTrainingDataConfig,
+    from orli.configs import (OrliSegmentationTrainingDataConfig,
                               OrliSegmentationTestConfig)
     from orli.model import OrliSegmentationDataModule, OrliSegmentationModel
 
@@ -91,15 +90,15 @@ def test(ctx, **kwargs):
 
     dm_config = OrliSegmentationTrainingDataConfig(test_data=list(test_data),
                                                    **params)
-    m_config = OrliSegmentationTrainingConfig(**params)
 
     data_module = OrliSegmentationDataModule(dm_config)
 
     load = str(load)
     if load.endswith('.ckpt'):
-        model = OrliSegmentationModel.load_from_checkpoint(load, config=m_config)
+        model = OrliSegmentationModel.load_from_checkpoint(load,
+                                                           weights_only=False)
     else:
-        model = OrliSegmentationModel.load_from_weights(load, config=m_config)
+        model = OrliSegmentationModel.load_from_weights(load)
 
     if params.get('compile'):
         click.echo('Compiling model ', nl=False)
