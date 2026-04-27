@@ -4,7 +4,7 @@ Orli (**o**rdered **r**egression of **li**nes) is a layout analysis method
 performing the text line detection and reading order determination subtasks
 jointly.
 
-Orli consists of a ConvNeXtV2-tiny vision encoder, an adapter module projecting
+Orli consists of a ConvNeXtV2 vision encoder, an adapter module projecting
 multi-scale feature maps into a shared embedding space, and a transformer
 decoder with cross-attention. The autoregressive decoder predicts baselines by
 regressing the normalized control points of cubic Bezier curves through
