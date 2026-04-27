@@ -101,7 +101,7 @@ $ ketos convert -o model.safetensors checkpoint.ckpt
 Inference is implemented through the plugin system in kraken (>= 7):
 
 ```bash
-$ kraken -i input.jpg output.xml -a segment -bl -m model.safetensors
+$ kraken -i input.jpg output.xml -a segment -bl -i model.safetensors
 ```
 
 ## Testing
