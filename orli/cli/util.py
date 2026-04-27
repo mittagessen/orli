@@ -18,27 +18,75 @@ orli.cli.util
 
 Command line driver helpers
 """
-import glob
-import logging
 import os
-from typing import List, Optional, Tuple
+import yaml
+import glob
+import difflib
+import logging
+from typing import Optional
 
 import click
-import lightning as L
 
-from lightning.pytorch.callbacks import BaseFinetuning
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from os import PathLike
 
 
 logging.captureWarnings(True)
-logger = logging.getLogger('orli')
+logger = logging.getLogger('party')
 
 
-def get_input_parser(type_str: str) -> Callable[[str], Dict[str, Any]]:
-    if type_str in ['alto', 'page', 'xml']:
-        from kraken.lib.xml import XMLPage
-        return XMLPage
-    elif type_str == 'image':
-        return Image.open
+def _recursive_update(a: dict[str, Any],
+                      b: dict[str, Any],
+                      cmd: Optional[click.BaseCommand] = None) -> dict[str, Any]:
+    """Like standard ``dict.update()``, but recursive so sub-dict gets updated.
+
+    Warns on keys present in ``b`` but not in ``a`` and not valid option names
+    for the command ``cmd`` and suggests alternatives.
+    """
+    valid_keys = set(a.keys())
+    if cmd is not None:
+        for param in cmd.params:
+            if param.name:
+                valid_keys.add(param.name)
+        if isinstance(cmd, click.MultiCommand):
+            valid_keys.update(cmd.list_commands(None))
+    for k, v in b.items():
+        if k not in valid_keys:
+            matches = difflib.get_close_matches(k, valid_keys)
+            msg = f'Ignoring unknown configuration key "{k}" in experiment file.'
+            if matches:
+                msg += f' Did you mean "{matches[0]}"?'
+            logger.warning(msg)
+        subcmd = None
+        if cmd is not None and isinstance(cmd, click.MultiCommand):
+            subcmd = cmd.get_command(None, k)
+        if isinstance(v, dict) and isinstance(a.get(k), dict):
+            a[k] = _recursive_update(a[k], v, subcmd)
+        elif isinstance(v, dict) and subcmd is not None:
+            a[k] = _recursive_update({}, v, subcmd)
+        else:
+            a[k] = v
+    return a
+
+
+def _load_config(ctx: click.Context,
+                 param: click.Parameter,
+                 path: 'PathLike') -> None:
+    """
+    Fetch parameters values from configuration file and sets them as defaults.
+    """
+    logger.info(f"Load configuration matching {path}")
+    if path:
+        try:
+            conf = yaml.safe_load(path)
+            # Update the default_map.
+            if ctx.default_map is None:
+                ctx.default_map = {}
+            ctx.default_map = _recursive_update(ctx.default_map, conf, ctx.command)
+        except FileNotFoundError:
+            logger.critical(f"No configuration file {path} found.")
 
 
 def _validate_manifests(ctx, param, value):
@@ -65,7 +113,7 @@ def message(msg, **styles):
         click.secho(msg, **styles)
 
 
-def to_ptl_device(device: str) -> Tuple[str, Optional[List[int]]]:
+def to_ptl_device(device: str) -> tuple[str, Optional[list[int]]]:
     if device.strip() == 'auto':
         return 'auto', 'auto'
     devices = device.split(',')

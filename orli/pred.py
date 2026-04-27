@@ -18,71 +18,48 @@ orli.pred
 
 API for inference
 """
-import torch
 import logging
-import numpy as np
 
-from dataclasses import asdict
+from typing import Union, Optional, TYPE_CHECKING
 
-from kraken.containers import Segmentation, BaselineLine
+from kraken.tasks.segmentation import SegmentationTaskModel
+from kraken.models import load_models
+from orli.configs import OrliSegmentationInferenceConfig
 
-from typing import TYPE_CHECKING, Union, Tuple, Optional, Literal, Generator, List
+if TYPE_CHECKING:
+    from os import PathLike
+    from PIL import Image
 
-from orli.dataset import get_default_transforms
-
+from kraken.containers import Segmentation
 
 logging.captureWarnings(True)
 logger = logging.getLogger('orli')
 
-
-if TYPE_CHECKING:
-    from orli.fusion import OrliModel
-    from PIL import Image
-    from lightning.fabric import Fabric
-
-__all__ = ['batched_pred']
+__all__ = ['segment']
 
 
-def sample_curves(curves: torch.Tensor) -> List[List[Tuple[int, int]]]:
-    samples = np.linspace(0, 1, 20)
-    coeff = BezierCoeff(samples))
-    for curve in curves:
-        curve = np.array(curves)
-        curve.resize(4, 2)
-        coeff.dot(curve)
-
-
-def segment(model: 'OrliModel',
-            im: 'Image.Image',
-            fabric: 'Fabric') -> Segmentation
+def segment(im: 'Image.Image',
+            model_path: Union[str, 'PathLike'],
+            config: Optional[OrliSegmentationInferenceConfig] = None) -> Segmentation:
     """
-    Baseline segmentation
+    Performs baseline segmentation on an image.
+
+    The interface is compatible with kraken's SegmentationTaskModel: models
+    are loaded via ``kraken.models.load_models`` and wrapped in a
+    ``SegmentationTaskModel`` so the standard ``prepare_for_inference`` /
+    ``predict`` protocol is used.
 
     Args:
-        model: OrliModel for generation.
-        im: Pillow image
-        fabric: Fabric context manager to cast models and tensors.
+        im: PIL Image to segment.
+        model_path: Path to a safetensors file containing orli weights.
+        config: Inference configuration. If ``None`` a default
+                :class:`OrliSegmentationInferenceConfig` is created.
 
-    Returns: 
-        A Segmentation object 
+    Returns:
+        A :class:`Segmentation` container with detected baselines.
     """
-    m_dtype = next(model.parameters()).dtype
-    m_device = next(model.parameters()).device
-
-    curve_scale = torch.tensor(im.size * 4)
-
-    # load image transforms
-    im_transforms = get_default_transforms(dtype=m_dtype)
-
-    # prepare model for generation
-    model.prepare_for_generation(batch_size=1, device=m_device)
-    model = model.eval()
-
-    with fabric.init_tensor(), torch.inference_mode():
-        image_input = im_transforms(im).unsqueeze(0).to(m_device)
-        curves = model.predict(encoder_input=image_input).squeeze()
-        # strip trailing no-op if it is there.
-        if not curves[-1].any():
-            curves = curves[:-1]
-        curves *= curve_scale
-    lines = sample_curve(curves)
+    if config is None:
+        config = OrliSegmentationInferenceConfig()
+    models = load_models(model_path, tasks=['segmentation'])
+    task = SegmentationTaskModel(models)
+    return task.predict(im, config)

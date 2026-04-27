@@ -14,18 +14,18 @@
 # permissions and limitations under the License.
 """
 orli.cli.train
-~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~
 
-Command line driver for recognition training.
+Command line driver for segmentation training.
 """
+import click
 import logging
 
-import click
+from pathlib import Path
 from threadpoolctl import threadpool_limits
+from kraken.registry import OPTIMIZERS, SCHEDULERS, STOPPERS
 
-from orli.default_specs import SEGMENTATION_HYPER_PARAMS
-
-from .util import _expand_gt, _validate_manifests, message, to_ptl_device
+from .util import _expand_gt, _validate_manifests, message
 
 logging.captureWarnings(True)
 logger = logging.getLogger('orli')
@@ -34,280 +34,247 @@ logger = logging.getLogger('orli')
 logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
 
 
-@click.command('convert')
-@click.pass_context
-@click.option('-o', '--output', show_default=True, type=click.Path(), default='model.safetensors', help='Output model file')
-@click.option('-i', '--model-card', show_default=True, default=None, type=click.File(mode='r', lazy=True),
-              help='Markdown file containing the model card.')
-@click.argument('checkpoint_path', nargs=1, type=click.Path(exists=True, dir_okay=False))
-def convert(ctx, output, model_card, checkpoint_path):
-    """
-    Converts a checkpoint into the new safetensors-based kraken serialization
-    format.
-    """
-    from .util import message
-
-    from orli.util import checkpoint_to_kraken
-
-    if model_card:
-        model_card = model_card.read()
-
-    checkpoint_to_kraken(checkpoint_path,
-                         filename=output,
-                         model_card=model_card)
-
-    message(f'Output file written to {output}')
-
-
 @click.command('train')
-@click.pass_context
-@click.option('--load-from-checkpoint', default=None, type=click.Path(exists=True), help='Path to checkpoint to load')
-@click.option('--load-from-repo', default=None, help='Identifier of model on HTRMoPo repository, .e.g `10.5281/zenodo.14616981`')
-@click.option('--load-from-safetensors', default=None, help='Path to safetensors file to load')
-@click.option('--train-from-scratch', is_flag=True, show_default=True, default=False, help='Train model from scratch')
-@click.option('-B', '--batch-size', show_default=True, type=click.INT,
-              default=SEGMENTATION_HYPER_PARAMS['batch_size'], help='batch sample size')
-@click.option('-o', '--output', show_default=True, type=click.Path(), default='model', help='Output model file')
-@click.option('-F', '--freq', show_default=True, default=SEGMENTATION_HYPER_PARAMS['freq'], type=click.FLOAT,
+@click.option('-B', '--batch-size', type=int, help='batch sample size')
+@click.option('-o', '--output', 'checkpoint_path', type=click.Path(), default='model', help='Output checkpoint path')
+@click.option('--weights-format', default='safetensors', help='Output weights format.')
+@click.option('-i', '--load', type=click.Path(exists=True, readable=True), help='Load existing file to continue training')
+@click.option('--resume', type=click.Path(exists=True, readable=True), help='Load a checkpoint to continue training')
+@click.option('-F', '--freq', type=click.FLOAT,
               help='Model saving and report generation frequency in epochs '
                    'during training. If frequency is >1 it must be an integer, '
                    'i.e. running validation every n-th epoch.')
 @click.option('-q',
               '--quit',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['quit'],
-              type=click.Choice(['early',
-                                 'fixed']),
-              help='Stop condition for training. Set to `early` for early stooping or `fixed` for fixed number of epochs')
+              type=click.Choice(STOPPERS),
+              help='Stop condition for training. Set to `early` for early stopping or `fixed` for fixed number of epochs')
 @click.option('-N',
               '--epochs',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['epochs'],
+              type=int,
               help='Number of epochs to train for')
 @click.option('--min-epochs',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['min_epochs'],
+              type=int,
               help='Minimal number of epochs to train for when using early stopping.')
-@click.option('--freeze-encoder/--no-freeze-encoder', show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['freeze_encoder'], help='Switch to freeze the encoder')
 @click.option('--lag',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['lag'],
+              type=int,
               help='Number of evaluations (--report frequency) to wait before stopping training without improvement')
 @click.option('--min-delta',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['min_delta'],
-              type=click.FLOAT,
-              help='Minimum improvement between epochs to reset early stopping. Default is scales the delta by the best loss')
+              type=float,
+              help='Minimum improvement between epochs to reset early stopping. By default it scales the delta by the best loss')
 @click.option('--optimizer',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['optimizer'],
-              type=click.Choice(['Adam',
-                                 'AdamW',
-                                 'SGD',
-                                 'Mars',
-                                 'Adam8bit',
-                                 'AdamW8bit',
-                                 'Adam4bit',
-                                 'AdamW4bit']),
+              type=click.Choice(OPTIMIZERS),
               help='Select optimizer')
-@click.option('-r', '--lrate', show_default=True, default=SEGMENTATION_HYPER_PARAMS['lr'], help='Learning rate')
-@click.option('-m', '--momentum', show_default=True, default=SEGMENTATION_HYPER_PARAMS['momentum'], help='Momentum')
-@click.option('-w', '--weight-decay', show_default=True, type=float,
-              default=SEGMENTATION_HYPER_PARAMS['weight_decay'], help='Weight decay')
-@click.option('--gradient-clip-val', show_default=True, default=SEGMENTATION_HYPER_PARAMS['gradient_clip_val'], help='Gradient clip value')
-@click.option('--warmup', show_default=True, type=int,
-              default=SEGMENTATION_HYPER_PARAMS['warmup'], help='Number of steps to ramp up to `lrate` initial learning rate.')
+@click.option('-r',
+              '--lrate',
+              type=float,
+              help='Learning rate')
+@click.option('-m',
+              '--momentum',
+              type=float,
+              help='Momentum')
+@click.option('-w',
+              '--weight-decay',
+              type=float,
+              help='Weight decay')
+@click.option('--gradient-clip-val',
+              type=float,
+              help='Gradient clip value')
+@click.option('--accumulate-grad-batches',
+              type=int,
+              help='Number of batches to accumulate gradient across.')
+@click.option('--warmup',
+              type=int,
+              help='Number of steps to ramp up to `lrate` initial learning rate.')
 @click.option('--schedule',
-              show_default=True,
-              type=click.Choice(['constant',
-                                 '1cycle',
-                                 'exponential',
-                                 'cosine',
-                                 'step',
-                                 'reduceonplateau']),
-              default=SEGMENTATION_HYPER_PARAMS['schedule'],
-              help='Set learning rate scheduler. For 1cycle, cycle length is determined by the `--epoch` option.')
+              type=click.Choice(SCHEDULERS),
+              help='Set learning rate scheduler. For 1cycle, cycle length is determined by the `--step-size` option.')
 @click.option('-g',
               '--gamma',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['gamma'],
+              type=float,
               help='Decay factor for exponential, step, and reduceonplateau learning rate schedules')
 @click.option('-ss',
               '--step-size',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['step_size'],
+              type=float,
               help='Number of validation runs between learning rate decay for exponential and step LR schedules')
 @click.option('--sched-patience',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['rop_patience'],
+              'rop_patience',
+              type=int,
               help='Minimal number of validation runs between LR reduction for reduceonplateau LR schedule.')
 @click.option('--cos-max',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['cos_t_max'],
+              'cos_t_max',
+              type=int,
               help='Epoch of minimal learning rate for cosine LR scheduler.')
 @click.option('--cos-min-lr',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['cos_min_lr'],
+              type=float,
               help='Minimal final learning rate for cosine LR scheduler.')
-@click.option('-t', '--training-files', show_default=True, default=None, multiple=True,
+@click.option('-p',
+              '--partition',
+              type=float,
+              help='Ground truth data partition ratio between train/validation set')
+@click.option('-t', '--training-files', 'training_data', default=None, multiple=True,
               callback=_validate_manifests, type=click.File(mode='r', lazy=True),
               help='File(s) with additional paths to training data')
-@click.option('-e', '--evaluation-files', show_default=True, default=None, multiple=True,
+@click.option('-e', '--evaluation-files', 'evaluation_data', default=None, multiple=True,
               callback=_validate_manifests, type=click.File(mode='r', lazy=True),
               help='File(s) with paths to evaluation data. Overrides the `-p` parameter')
-@click.option('--workers', show_default=True, default=1, type=click.IntRange(1), help='Number of worker processes.')
-@click.option('--threads', show_default=True, default=1, type=click.IntRange(1), help='Maximum size of OpenMP/BLAS thread pool.')
-@click.option('--augment/--no-augment',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['augment'],
-              help='Enable image augmentation')
-@click.option('--accumulate-grad-batches',
-              show_default=True,
-              default=SEGMENTATION_HYPER_PARAMS['accumulate_grad_batches'],
-              help='Number of batches to accumulate gradient across.')
-@click.option('--validate-before-train/--no-validate-before-train', show_default=True, default=True, help='Enables validation run before first training run.')
+@click.option('-f',
+              '--format-type',
+              type=click.Choice(['binary']),
+              help='Sets the training data format.')
+@click.option('-is', '--image-size', type=(int, int), help='Network input image size.')
+@click.option('--model-variant',
+              type=click.Choice(['pico', 'tiny', 'small']),
+              help='Model size preset to train.')
+@click.option('--augment/--no-augment', help='Enable image augmentation')
+@click.option('--logger',
+              'pl_logger',
+              type=click.Choice(['tensorboard', 'wandb']),
+              help='Logger to use for training.')
+@click.option('--slurm/--no-slurm',
+              help='Enable SLURM environment plugin with automatic job resubmission on preemption.')
 @click.argument('ground_truth', nargs=-1, callback=_expand_gt, type=click.Path(exists=False, dir_okay=False))
-def train(ctx, load_from_checkpoint, load_from_repo, load_from_safetensors,
-          train_from_scratch, batch_size, output, freq, quit, epochs,
-          min_epochs, freeze_encoder, lag, min_delta, optimizer, lrate,
-          momentum, weight_decay, gradient_clip_val, warmup, schedule, gamma,
-          step_size, sched_patience, cos_max, cos_min_lr, training_files,
-          evaluation_files, workers, threads, augment, accumulate_grad_batches,
-          validate_before_train, ground_truth):
+@click.pass_context
+def train(ctx, **kwargs):
     """
-    Trains a model from image-text pairs.
+    Trains an object detection model from XML facsimile files.
     """
-    if not (0 <= freq <= 1) and freq % 1.0 != 0:
-        raise click.BadOptionUsage('freq', 'freq needs to be either in the interval [0,1.0] or a positive integer.')
+    params = {}
+    if ctx.default_map:
+        params.update(ctx.default_map)
+    params.update(ctx.params)
+    params.update(ctx.meta)
+    resume = params.pop('resume', None)
+    load = params.pop('load', None)
+    training_data = params.pop('training_data', [])
+    ground_truth = list(params.pop('ground_truth', []))
 
-    if sum(map(bool, [load_from_checkpoint, load_from_repo, load_from_safetensors])) > 1:
-        raise click.BadOptionsUsage('load_from_checkpoint', 'load_from_* options are mutually exclusive.')
-    elif load_from_checkpoint is None and load_from_repo is None and load_from_safetensors is None:
-        load_from_repo = '10.5281/zenodo.14616981'
+    if sum(map(bool, [resume, load])) > 1:
+        raise click.BadOptionsUsage('load', 'load/resume options are mutually exclusive.')
 
-    if augment:
+    if params.get('augment'):
         try:
             import albumentations  # NOQA
         except ImportError:
             raise click.BadOptionUsage('augment', 'augmentation needs the `albumentations` package installed.')
 
+    if params.get('pl_logger') == 'tensorboard':
+        try:
+            import tensorboard  # NOQA
+        except ImportError:
+            raise click.BadOptionUsage('logger', 'tensorboard logger needs the `tensorboard` package installed.')
+
+    if params.get('pl_logger') == 'wandb':
+        try:
+            import wandb  # NOQA
+        except ImportError:
+            raise click.BadOptionUsage('logger', 'wandb logger needs the `wandb` package installed.')
+
     import torch
 
-    from orli.dataset import LineSegmentationDataModule
-    from orli.model import SegmentationModel
+    from orli.configs import OrliSegmentationTrainingConfig, OrliSegmentationTrainingDataConfig
+    from orli.model import OrliSegmentationDataModule, OrliSegmentationModel
 
     from lightning.pytorch import Trainer
-    from lightning.pytorch.callbacks import RichModelSummary, ModelCheckpoint, RichProgressBar
+    from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar
+    from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 
-    torch.set_float32_matmul_precision('medium')
+    from kraken.models import convert_models
+    from kraken.train.utils import KrakenOnExceptionCheckpoint
 
-    hyper_params = SEGMENTATION_HYPER_PARAMS.copy()
-    hyper_params.update({'freq': freq,
-                         'batch_size': batch_size,
-                         'quit': quit,
-                         'epochs': epochs,
-                         'min_epochs': min_epochs,
-                         'freeze_encoder': freeze_encoder,
-                         'lag': lag,
-                         'min_delta': min_delta,
-                         'optimizer': optimizer,
-                         'lr': lrate,
-                         'momentum': momentum,
-                         'weight_decay': weight_decay,
-                         'warmup': warmup,
-                         'schedule': schedule,
-                         'gamma': gamma,
-                         'step_size': step_size,
-                         'rop_patience': sched_patience,
-                         'cos_t_max': cos_max,
-                         'cos_min_lr': cos_min_lr,
-                         'augment': augment,
-                         'accumulate_grad_batches': accumulate_grad_batches,
-                         'gradient_clip_val': gradient_clip_val,
-                         })
+    torch.set_float32_matmul_precision('high')
 
-    ground_truth = list(ground_truth)
+    # disable automatic partition when given evaluation set explicitly
+    if params['evaluation_data']:
+        params['partition'] = 1
 
     # merge training_files into ground_truth list
-    if training_files:
-        ground_truth.extend(training_files)
+    if training_data:
+        ground_truth.extend(training_data)
 
-    if len(ground_truth) == 0:
+    params['training_data'] = ground_truth
+
+    if len(ground_truth) == 0 and not resume:
         raise click.UsageError('No training data was provided to the train command. Use `-t` or the `ground_truth` argument.')
 
-    try:
-        accelerator, device = to_ptl_device(ctx.meta['device'])
-    except Exception as e:
-        raise click.BadOptionUsage('device', str(e))
-
-    if hyper_params['freq'] > 1:
-        val_check_interval = {'check_val_every_n_epoch': int(hyper_params['freq'])}
+    if params['freq'] > 1:
+        val_check_interval = {'check_val_every_n_epoch': int(params['freq'])}
     else:
-        val_check_interval = {'val_check_interval': hyper_params['freq']}
+        val_check_interval = {'val_check_interval': params['freq']}
 
-    data_module = LineSegmentationDataModule(training_data=ground_truth,
-                                             evaluation_data=evaluation_files,
-                                             augmentation=augment,
-                                             batch_size=batch_size,
-                                             num_workers=workers)
-
-    cbs = [RichModelSummary(max_depth=2)]
-
-    checkpoint_callback = ModelCheckpoint(dirpath=output,
+    cbs = []
+    checkpoint_dir = params.pop('checkpoint_path')
+    checkpoint_callback = ModelCheckpoint(dirpath=checkpoint_dir,
                                           save_top_k=10,
-                                          monitor='global_step',
+                                          monitor='val_metric',
                                           mode='min',
                                           auto_insert_metric_name=False,
                                           filename='checkpoint_{epoch:02d}-{val_metric:.4f}')
-
     cbs.append(checkpoint_callback)
-    if not ctx.meta['verbose']:
+    cbs.append(KrakenOnExceptionCheckpoint(checkpoint_dir))
+
+    dm_config = OrliSegmentationTrainingDataConfig(**params)
+    m_config = OrliSegmentationTrainingConfig(**params)
+
+    if resume:
+        data_module = OrliSegmentationDataModule.load_from_checkpoint(resume, weights_only=False)
+    else:
+        data_module = OrliSegmentationDataModule(dm_config)
+
+    if not params['verbose']:
         cbs.append(RichProgressBar(leave=True))
 
-    trainer = Trainer(accelerator=accelerator,
-                      devices=device,
+    pl_logger = None
+    if params.get('pl_logger') == 'tensorboard':
+        pl_logger = TensorBoardLogger(save_dir=checkpoint_dir)
+    elif params.get('pl_logger') == 'wandb':
+        pl_logger = WandbLogger(project='orli',
+                                save_dir=checkpoint_dir,
+                                log_model=False)
+
+    plugins = []
+    if params.get('slurm'):
+        from lightning.pytorch.plugins.environments import SLURMEnvironment
+        plugins.append(SLURMEnvironment(auto_requeue=True))
+
+    trainer = Trainer(accelerator=ctx.meta['accelerator'],
+                      devices=ctx.meta['devices'],
                       precision=ctx.meta['precision'],
-                      max_epochs=hyper_params['epochs'] if hyper_params['quit'] == 'fixed' else -1,
-                      min_epochs=hyper_params['min_epochs'],
+                      max_epochs=params['epochs'] if params['quit'] == 'fixed' else -1,
+                      min_epochs=params['min_epochs'],
                       enable_progress_bar=True if not ctx.meta['verbose'] else False,
                       deterministic=ctx.meta['deterministic'],
-                      enable_model_summary=False,
-                      accumulate_grad_batches=hyper_params['accumulate_grad_batches'],
+                      enable_model_summary=True,
+                      accumulate_grad_batches=params['accumulate_grad_batches'],
                       callbacks=cbs,
-                      gradient_clip_val=hyper_params['gradient_clip_val'],
+                      gradient_clip_val=params['gradient_clip_val'],
                       num_sanity_val_steps=0,
+                      logger=pl_logger if pl_logger else False,
+                      plugins=plugins if plugins else None,
                       **val_check_interval)
 
-    with trainer.init_module():
-        if train_from_scratch:
+    with trainer.init_module(empty_init=False if (load or resume) else True):
+        if load:
+            message(f'Loading from checkpoint {load}.')
+            if load.endswith('ckpt'):
+                model = OrliSegmentationModel.load_from_checkpoint(load,
+                                                                   config=m_config,
+                                                                   weights_only=False)
+            else:
+                model = OrliSegmentationModel.load_from_weights(load, config=m_config)
+        elif resume:
+            message(f'Resuming from checkpoint {resume}.')
+            model = OrliSegmentationModel.load_from_checkpoint(resume, weights_only=False)
+        else:
             message('Initializing new model.')
-            model = SegmentationModel(**hyper_params)
-        elif load_from_checkpoint:
-            message(f'Loading from checkpoint {load_from_checkpoint}.')
-            model = SegmentationModel.load_from_checkpoint(load_from_checkpoint,
-                                                           **hyper_params)
-        elif load_from_repo:
-            message(f'Loading from HTRMoPo {load_from_repo}.')
-            model = SegmentationModel.load_from_repo(load_from_repo,
-                                                     **hyper_params)
-        elif load_from_safetensors:
-            message(f'Loading from safetensors file {load_from_safetensors}.')
-            model = SegmentationModel.load_from_safetensors(load_from_safetensors,
-                                                            **hyper_params)
+            model = OrliSegmentationModel(m_config)
 
+    with threadpool_limits(limits=ctx.meta['num_threads']):
+        if resume:
+            trainer.fit(model, data_module, ckpt_path=resume, weights_only=False)
+        else:
+            trainer.fit(model, data_module)
 
-    with threadpool_limits(limits=threads):
-        if validate_before_train:
-            trainer.validate(model, data_module)
-        trainer.fit(model, data_module)
-
-    if model.best_epoch == -1:
-        logger.warning('Model did not improve during training.')
-        ctx.exit(1)
-
-    if not model.current_epoch:
-        logger.warning('Training aborted before end of first epoch.')
-        ctx.exit(1)
-
-    print(f'Best model {checkpoint_callback.best_model_path}')
+    score = checkpoint_callback.best_model_score.item()
+    weight_path = Path(checkpoint_callback.best_model_path).with_name(f'best_{score:.4f}.{params.get("weights_format")}')
+    opath = convert_models([checkpoint_callback.best_model_path], weight_path, weights_format=params['weights_format'])
+    message(f'Converting best model {checkpoint_callback.best_model_path} (score: {score:.4f}) to weights {opath}')

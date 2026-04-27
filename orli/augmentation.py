@@ -23,19 +23,24 @@ logger = logging.getLogger(__name__)
 class DefaultAugmenter:
     def __init__(self):
         import cv2
-        cv2.setNumThreads(0)
+        cv2.setNumThreads(2)
         from albumentations import (Blur, Compose, MedianBlur, MotionBlur,
-                                    OneOf, PixelDropout, ToFloat, ColorJitter)
+                                    ToGray, OneOf, PixelDropout, ToFloat,
+                                    ColorJitter, CoarseDropout)
 
         self._transforms = Compose([
                                     ToFloat(),
                                     PixelDropout(p=0.2),
                                     ColorJitter(p=0.5),
+                                    ToGray(p=0.2),
                                     OneOf([
                                         MotionBlur(p=0.2),
                                         MedianBlur(blur_limit=3, p=0.1),
                                         Blur(blur_limit=3, p=0.1),
-                                    ], p=0.2)
+                                    ], p=0.2),
+                                    CoarseDropout(max_holes=8, max_height=64, max_width=64,
+                                                  min_holes=2, min_height=16, min_width=16,
+                                                  fill_value=0, p=0.3),
                                    ], p=0.5)
 
     def __call__(self, image):

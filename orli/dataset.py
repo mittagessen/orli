@@ -16,18 +16,18 @@
 Utility functions for data loading and training of VGSL networks.
 """
 import io
+import gc
 import torch
+import ctypes
 import torch.nn.functional as F
-import lightning.pytorch as L
 
 import numpy as np
 import pyarrow as pa
 
-from functools import partial
 from torchvision.transforms import v2
 from typing import TYPE_CHECKING, Union, Sequence
 
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
 from PIL import Image
 
@@ -36,7 +36,7 @@ from torch.utils.data import default_collate
 if TYPE_CHECKING:
     from os import PathLike
 
-__all__ = ['LineSegmentationDataModule']
+__all__ = ['BaselineSegmentationDataset']
 
 import logging
 
@@ -45,11 +45,14 @@ logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = 20000 ** 2
 
 
-def get_default_transforms(dtype=torch.float32):
-    return v2.Compose([v2.Resize((2560, 1920)),
-                       v2.ToImage(),
-                       v2.ToDtype(dtype, scale=True),
-                       v2.Normalize(mean=[0.4850, 0.4560, 0.4060], std=[0.2290, 0.2240, 0.2250])])
+def get_default_transforms(image_size, dtype=torch.float32, normalize: bool = True):
+    transforms = [v2.Resize(image_size),
+                  v2.ToImage(),
+                  v2.ToDtype(dtype, scale=True)]
+    if normalize:
+        transforms.append(v2.Normalize(mean=(0.485, 0.456, 0.406),
+                                       std=(0.229, 0.224, 0.225)))
+    return v2.Compose(transforms)
 
 
 def collate_curves(batch,
@@ -57,6 +60,10 @@ def collate_curves(batch,
     """
     Concatenates and pads curves.
     """
+    gc.collect()
+    libc = ctypes.CDLL("libc.so.6")
+    libc.malloc_trim(0)
+    gc.collect()
     return {'image': default_collate([item['image'] for item in batch]),
             'tokens': torch.stack([F.pad(x['tokens'], pad=(0, 0, 0, max_lines_in_page-len(x['tokens'])), value=-1) for x in batch]),
             'curves': torch.stack([F.pad(x['curves'], pad=(0, 0, 0, max_lines_in_page-len(x['curves'])), value=-1) for x in batch])}
@@ -69,66 +76,6 @@ def _validation_worker_init_fn(worker_id):
         at info level about the seed being changed. """
     from lightning.pytorch import seed_everything
     seed_everything(42)
-
-
-class LineSegmentationDataModule(L.LightningDataModule):
-    def __init__(self,
-                 training_data: Union[str, 'PathLike'],
-                 evaluation_data: Union[str, 'PathLike'],
-                 augmentation: bool = False,
-                 batch_size: int = 1,
-                 num_workers: int = 8):
-        super().__init__()
-
-        self.bos_token_id = 1
-        self.eos_token_id = 2
-        self.line_token_id = 3
-
-        self.save_hyperparameters()
-        self.im_transforms = get_default_transforms()
-
-    def setup(self, stage: str):
-        """
-        Actually builds the datasets.
-        """
-        self.train_set = BaselineSegmentationDataset(self.hparams.training_data,
-                                                     im_transforms=self.im_transforms,
-                                                     augmentation=self.hparams.augmentation,
-                                                     bos_token_id=self.bos_token_id,
-                                                     eos_token_id=self.eos_token_id,
-                                                     line_token_id=self.line_token_id)
-
-        self.val_set = BaselineSegmentationDataset(self.hparams.evaluation_data,
-                                                   im_transforms=self.im_transforms,
-                                                   augmentation=False,
-                                                   bos_token_id=self.bos_token_id,
-                                                   eos_token_id=self.eos_token_id,
-                                                   line_token_id=self.line_token_id)
-
-        max_lines_in_page = max(self.train_set.max_lines_in_page, self.val_set.max_lines_in_page)
-        logger.info(f'Max number of lines in page: {max_lines_in_page} (limit: {self.train_set.max_lines_per_page})')
-
-        self.collator = partial(collate_curves,
-                                max_lines_in_page=min(max(self.train_set.max_lines_in_page,
-                                                          self.val_set.max_lines_in_page),
-                                                      self.train_set.max_lines_per_page))
-
-    def train_dataloader(self):
-        return DataLoader(self.train_set,
-                          batch_size=self.hparams.batch_size,
-                          num_workers=self.hparams.num_workers,
-                          pin_memory=True,
-                          shuffle=True,
-                          collate_fn=self.collator)
-
-    def val_dataloader(self):
-        return DataLoader(self.val_set,
-                          shuffle=False,
-                          batch_size=self.hparams.batch_size,
-                          num_workers=self.hparams.num_workers,
-                          pin_memory=True,
-                          worker_init_fn=_validation_worker_init_fn,
-                          collate_fn=self.collator)
 
 
 class BaselineSegmentationDataset(Dataset):
@@ -146,6 +93,7 @@ class BaselineSegmentationDataset(Dataset):
     def __init__(self,
                  files: Sequence[Union[str, 'PathLike']],
                  im_transforms=None,
+                 normalize_image: bool = True,
                  augmentation: bool = False,
                  max_lines_per_page: int = 768,
                  bos_token_id: int = 1,
@@ -160,6 +108,9 @@ class BaselineSegmentationDataset(Dataset):
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.line_token_id = line_token_id
+        self.normalizer = v2.Normalize(mean=(0.485, 0.456, 0.406),
+                                       std=(0.229, 0.224, 0.225)) if normalize_image else None
+        self.rng = np.random.default_rng()
 
         for file in files:
             with pa.memory_map(file, 'rb') as source:
@@ -171,7 +122,7 @@ class BaselineSegmentationDataset(Dataset):
                 raw_metadata = ds_table.schema.metadata
                 if not raw_metadata or b'max_lines_in_page' not in raw_metadata:
                     raise ValueError(f'{file} does not contain a valid metadata record.')
-                self.max_lines_in_page = max(int.from_bytes(raw_metadata[b'max_lines_in_page'], 'little'), self.max_lines_in_page)
+                self.max_lines_in_page = max(int.from_bytes(raw_metadata[b'max_lines_in_page'], 'little') + 2, self.max_lines_in_page)
                 if not self.arrow_table:
                     self.arrow_table = ds_table
                 else:
@@ -187,16 +138,14 @@ class BaselineSegmentationDataset(Dataset):
         logger.debug(f'Attempting to load {item["im"]}')
         im, page_data = item['im'], item['lines']
         # skip pages with more than max_pos_embeddings lines
-        if len(page_data) + 2 > self.max_lines_per_page:
-            rng = np.random.default_rng()
-            idx = rng.integers(0, len(self))
+        if len(page_data) + 2 >= self.max_lines_per_page:
+            idx = int(self.rng.integers(0, len(self)))
             return self[idx]
 
         try:
             im = Image.open(io.BytesIO(im)).convert('RGB')
         except Exception:
-            rng = np.random.default_rng()
-            idx = rng.integers(0, len(self))
+            idx = int(self.rng.integers(0, len(self)))
             return self[idx]
 
         im = self.transforms(im)
@@ -204,7 +153,7 @@ class BaselineSegmentationDataset(Dataset):
         lines = [x['curve'] for x in page_data]
         lines.append(8 * [-1.])
         lines.insert(0, 8 * [0])
-        lines = torch.tensor(lines)
+        lines = torch.tensor(lines, dtype=torch.float32)
         # one-hot encode cls here so we can embed curves and classes with a
         # single linear projection.
         line_cls = torch.full((len(lines),), self.line_token_id, dtype=torch.long)
@@ -216,9 +165,8 @@ class BaselineSegmentationDataset(Dataset):
             im = im.permute((1, 2, 0)).numpy()
             o = self.aug(image=im)
             im = torch.from_numpy(o['image'].transpose(2, 0, 1))
-            # baselines
-            lines += torch.rand_like(lines) * 0.001
-            lines.clamp_(0, 1)
+        if self.normalizer:
+            im = self.normalizer(im)
 
         return {'image': im,
                 'tokens': line_cls,
