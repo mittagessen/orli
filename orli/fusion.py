@@ -31,6 +31,9 @@ from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                           Llama3ScaledRoPE, llama3_mlp,
                           PositionEmbeddingRandom)
 from orli.modules.transformer import _get_clones
+from orli.modules.baseline import (DEFAULT_NUM_BASELINE_POINTS,
+                                   baseline_param_dim,
+                                   prepare_baseline_anchors)
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +86,7 @@ class CurveTokenEmbedding(nn.Module):
         return self.tok_proj(tok) + self.curve_proj(curve_feat)
 
 
-def baseline_decoder(vocab_size: int = 12,
+def baseline_decoder(vocab_size: int = 4 + baseline_param_dim(DEFAULT_NUM_BASELINE_POINTS),
                      num_layers: int = 12,
                      num_heads: int = 9,
                      num_kv_heads: int = 3,
@@ -97,7 +100,7 @@ def baseline_decoder(vocab_size: int = 12,
                      pretrained: Optional[str] = None,
                      **kwargs) -> TransformerDecoder:
     """
-    Builds a decoder regressing baselines as cubic Bézier curves using
+    Builds a decoder regressing ordered local-frame baseline vectors using
     iterative refinement.
 
     Args:
@@ -650,27 +653,31 @@ def inverse_sigmoid(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
 
 class CurveRegressionHead(nn.Module):
     """
-    Iterative refinement regression head for baseline curves.
+    Iterative refinement regression head for local-frame baseline vectors.
 
     Uses sigmoid/inverse-sigmoid refinement: offsets are predicted in logit
-    space and combined with the previous iteration's curves via inverse
+    space and combined with the previous iteration's baseline vector via inverse
     sigmoid, addition, and sigmoid. This ensures outputs stay in [0,1] and
     provides better gradient flow near boundaries. Each refinement step
-    conditions its offset prediction on the decoder state, the selected
-    anchor identity, and the current curve state.
+    conditions its offset prediction on the decoder state, the selected anchor
+    identity, and the current baseline state.
     """
 
     def __init__(self,
                  anchors: tuple[tuple[float, ...], ...],
                  embed_dim: int = 576,
                  num_layers: int = 3,
-                 num_iterations: int = 4):
+                 num_iterations: int = 4,
+                 num_baseline_points: int = DEFAULT_NUM_BASELINE_POINTS):
         super().__init__()
         if isinstance(anchors, torch.Tensor):
             anchors_t = anchors.float()
         else:
             anchors_t = torch.tensor(anchors, dtype=torch.float32)
+        anchors_t = prepare_baseline_anchors(anchors_t, num_points=num_baseline_points)
         self.num_anchors = anchors_t.shape[0]
+        self.num_baseline_points = int(num_baseline_points)
+        self.curve_dim = anchors_t.shape[-1]
         num_cls = 4
         reg_hidden_dim = scale_hidden_dim_for_mlp(embed_dim)
 
@@ -683,7 +690,7 @@ class CurveRegressionHead(nn.Module):
             for n in range(num_layers-1):
                 reg_proj.append(nn.Linear(reg_hidden_dim if n else embed_dim, reg_hidden_dim))
                 reg_proj.append(nn.SiLU())
-        reg_proj.append(nn.Linear(reg_hidden_dim if num_layers > 1 else embed_dim, 8))
+        reg_proj.append(nn.Linear(reg_hidden_dim if num_layers > 1 else embed_dim, self.curve_dim))
         # zero-initialize the final layer for near-zero initial offsets
         nn.init.zeros_(reg_proj[-1].weight)
         nn.init.zeros_(reg_proj[-1].bias)
@@ -697,7 +704,7 @@ class CurveRegressionHead(nn.Module):
             reg_input_proj.weight[:, embed_dim:].normal_(std=1e-3)
         self.anchor_proj = nn.Linear(embed_dim, self.num_anchors)
         self.anchor_embeddings = nn.Embedding(self.num_anchors, embed_dim)
-        self.curve_state_proj = nn.Linear(8, embed_dim, bias=False)
+        self.curve_state_proj = nn.Linear(self.curve_dim, embed_dim, bias=False)
         self.reg_input_projs = _get_clones(reg_input_proj, num_iterations)
         self.reg_projs = _get_clones(reg_proj, num_iterations)
         self.cls_projs = _get_clones(cls_proj, num_iterations)
@@ -714,10 +721,11 @@ class CurveRegressionHead(nn.Module):
                 initialization.
 
         Returns:
-            A dictionary containing an output tensor with shape ``[num_iterations, b, s, 8]``
-            under the key `curves` and the class logits in `tokens` with shape
-            ``[num_iterations, b, s, 4]``. The first-step anchor logits are
-            returned under `anchors` with shape ``[b, s, num_anchors]``.
+            A dictionary containing an output tensor with shape
+            ``[num_iterations, b, s, curve_dim]`` under the key `curves` and the
+            class logits in `tokens` with shape ``[num_iterations, b, s, 4]``.
+            The first-step anchor logits are returned under `anchors` with shape
+            ``[b, s, num_anchors]``.
         """
         # anchor selection: use a dedicated first-step anchor head to pick the
         # per-token initialization anchor without overloading the token logits.
@@ -727,7 +735,7 @@ class CurveRegressionHead(nn.Module):
             anchor_idx = target_anchor_idx.clamp(min=0, max=self.num_anchors - 1)
         else:
             anchor_idx = anchor_logits.argmax(-1)  # [b, s]
-        init_curves = self.curve_anchors[anchor_idx]  # [b, s, 8]
+        init_curves = self.curve_anchors[anchor_idx]  # [b, s, curve_dim]
         anchor_cond = self.anchor_embeddings(anchor_idx)
 
         _curves: list[torch.Tensor] = [init_curves]

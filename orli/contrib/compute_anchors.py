@@ -1,15 +1,20 @@
 #! /usr/bin/env python
 """
-Computes representative curve anchors from one or more source datasets.
+Computes representative local-frame baseline anchors from one or more source datasets.
 
-Curves are transformed to logit space, robustly scaled, and a greedy k-center
-selection is run on the transformed representation. This yields anchors that
-cover the support of the dataset better than density-oriented clustering.
+Baselines are transformed to logit space, robustly scaled, and a greedy
+k-center selection is run on the transformed representation. This yields
+anchors that cover the support of the dataset better than density-oriented
+clustering.
 """
 import click
 import numpy as np
+import torch
 
 from rich.progress import track
+from orli.modules.baseline import (DEFAULT_NUM_BASELINE_POINTS,
+                                   fixed_arc_length_resample,
+                                   polyline_to_local_params)
 
 
 def _inverse_sigmoid(x: np.ndarray, eps: float = 1e-5) -> np.ndarray:
@@ -53,7 +58,8 @@ def _greedy_kcenter(points: np.ndarray, num_anchors: int) -> np.ndarray:
     return selected
 
 
-def _coverage_anchors(lines: np.ndarray, num_anchors: int) -> np.ndarray:
+def _coverage_anchors(lines: np.ndarray,
+                      num_anchors: int) -> np.ndarray:
     transformed = _inverse_sigmoid(lines)
     transformed, _, _ = _robust_scale(transformed)
     selected = _greedy_kcenter(transformed, num_anchors)
@@ -64,15 +70,32 @@ def _in_bounds_mask(lines: np.ndarray) -> np.ndarray:
     return np.logical_and(lines >= 0.0, lines <= 1.0).all(axis=1)
 
 
+def _line_to_local_params(line: dict, baseline_num_points: int) -> np.ndarray:
+    if 'polyline' not in line:
+        raise click.UsageError('Baseline dataset lines must contain a polyline field.')
+    source = torch.as_tensor(line['polyline'], dtype=torch.float32)
+    if source.ndim < 2 or source.shape[-1] != 2:
+        raise click.UsageError(f'Expected polyline with shape [n, 2], got {tuple(source.shape)}.')
+    points = fixed_arc_length_resample(source.reshape(-1, 2).clamp(0.0, 1.0),
+                                       num_points=baseline_num_points)
+    params = polyline_to_local_params(points)
+    return params.cpu().numpy()
+
+
 @click.command()
 @click.option('-n', '--num-anchors', default=5, help='Number of anchors to compute.', show_default=True)
+@click.option('--baseline-num-points',
+              default=DEFAULT_NUM_BASELINE_POINTS,
+              type=click.IntRange(4),
+              help='Number of local-frame baseline points.',
+              show_default=True)
 @click.option('-o', '--output',
               default='anchors.json',
               show_default=True,
               type=click.Path(dir_okay=False, writable=True),
               help='Output file for anchors.')
 @click.argument('files', nargs=-1)
-def cli(num_anchors, output, files):
+def cli(num_anchors, baseline_num_points, output, files):
     """
     Computes `n` anchors from one or more binary dataset files and writes them
     to a JSON file.
@@ -96,7 +119,7 @@ def cli(num_anchors, output, files):
         item = item.as_py()
         page_data = item['lines']
         for line in page_data:
-            lines.append(line['curve'])
+            lines.append(_line_to_local_params(line, baseline_num_points))
     if not lines:
         raise click.UsageError('No lines found in the provided datasets.')
 

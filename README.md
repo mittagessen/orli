@@ -7,8 +7,10 @@ jointly.
 Orli consists of a ConvNeXtV2 vision encoder, an adapter module projecting
 multi-scale feature maps into a shared embedding space, and a transformer
 decoder with cross-attention. The autoregressive decoder predicts baselines by
-regressing the normalized control points of cubic Bezier curves through
-iterative refinement.
+regressing local-frame baseline vectors through iterative refinement. Training
+targets are fixed-size, arc-length-resampled baseline polylines; the regressed
+vector stores the baseline center, length, orientation, and normal offsets for
+the sampled points.
 
 ## Installation
 
@@ -18,13 +20,13 @@ $ pip install .
 
 ## Dataset Preparation
 
-Orli needs to be trained on datasets precompiled from PageXML or ALTO files
-containing baseline information for each line in correct reading order. The
-binary dataset format is shared with
-[party](https://github.com/mittagessen/party). Install party and compile with:
+Orli needs to be trained on datasets precompiled from PageXML or ALTO files.
+The compiler stores each line as a normalized baseline `polyline` in source-file
+order; the training loader resamples those polylines for the configured baseline
+point count.
 
 ```bash
-$ party compile -o dataset.arrow --allow-textless *.xml
+$ orli compile -o dataset.arrow --allow-textless *.xml
 ```
 
 If you have recent GPUs or the input images are very large, the training is
@@ -32,7 +34,7 @@ probably I/O-bound. In that case it can help to resize the images in the
 dataset to the input size of the network. For the default (1280, 960):
 
 ```bash
-$ party compile -o dataset.arrow --allow-textless -r 1280 960
+$ orli compile -o dataset.arrow --allow-textless -r 1280 960 *.xml
 ```
 
 The compilation **always** uses the implicit reading order, i.e., the sequence
@@ -67,6 +69,7 @@ train:
   batch_size: 8
   val_batch_size: 16
   accumulate_grad_batches: 8
+  baseline_num_points: 16
 ```
 
 Train the model:

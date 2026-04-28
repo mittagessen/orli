@@ -20,6 +20,8 @@ import torch
 from safetensors.torch import save_file, _remove_duplicate_names
 from typing import Optional, Union, TYPE_CHECKING
 
+from orli.modules.baseline import DEFAULT_NUM_BASELINE_POINTS, baseline_param_dim
+
 if TYPE_CHECKING:
     from os import PathLike
 
@@ -33,7 +35,8 @@ def checkpoint_to_kraken(checkpoint_path: Union[str, 'PathLike'],
     """
     state_dict = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=True)
     # we do not have configurable encoders/decoders
-    config = {"decoder_vocab_size": 12,
+    config = {"baseline_num_points": DEFAULT_NUM_BASELINE_POINTS,
+              "decoder_vocab_size": 4 + baseline_param_dim(DEFAULT_NUM_BASELINE_POINTS),
               "decoder_num_layers": 4,
               "decoder_num_heads": 9,
               "decoder_num_kv_heads": 3,

@@ -11,6 +11,7 @@ from orli.configs import (OrliSegmentationTrainingConfig,
                           OrliSegmentationTrainingDataConfig,
                           OrliSegmentationTestConfig)
 
+from .compile import compile
 from .train import train
 from .test import test
 from .util import _load_config, to_ptl_device
@@ -42,6 +43,7 @@ Image.MAX_IMAGE_PIXELS = 20000 ** 2
 @click.group(context_settings=dict(show_default=True,
                                    default_map={**Config().__dict__,
                                                 **TrainingDataConfig().__dict__,
+                                                'compile': {},
                                                 'train': {**OrliSegmentationTrainingConfig().__dict__, **OrliSegmentationTrainingDataConfig().__dict__},
                                                 'test': {**OrliSegmentationTrainingDataConfig().__dict__, **OrliSegmentationTestConfig().__dict__}}))
 @click.version_option()
@@ -90,6 +92,7 @@ def cli(ctx, **kwargs):
     set_logger(logger, level=30 - min(10 * params['verbose'], 20))
 
 
+cli.add_command(compile)
 cli.add_command(train)
 cli.add_command(test)
 

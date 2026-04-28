@@ -39,6 +39,9 @@ import click
               type=float,
               show_default=True,
               help='Minimum match score for ordering evaluation')
+@click.option('--baseline-num-points',
+              type=click.IntRange(4),
+              help='Number of fixed arc-length baseline points in evaluation targets')
 @click.option('--compile/--no-compile',
               help='Switch to enable/disable torch.compile() on model',
               default=True,
@@ -88,17 +91,24 @@ def test(ctx, **kwargs):
     accelerator = ctx.meta['accelerator']
     devices = ctx.meta['devices']
 
-    dm_config = OrliSegmentationTrainingDataConfig(test_data=list(test_data),
-                                                   **params)
-
-    data_module = OrliSegmentationDataModule(dm_config)
-
     load = str(load)
     if load.endswith('.ckpt'):
         model = OrliSegmentationModel.load_from_checkpoint(load,
                                                            weights_only=False)
     else:
         model = OrliSegmentationModel.load_from_weights(load)
+
+    model_config = getattr(model.hparams, 'config', None)
+    model_points = getattr(model_config, 'baseline_num_points', None)
+    if model_points is None and model.net is not None:
+        model_points = getattr(model.net, 'baseline_num_points', None)
+    if model_points is not None:
+        params['baseline_num_points'] = model_points
+
+    dm_config = OrliSegmentationTrainingDataConfig(test_data=list(test_data),
+                                                   **params)
+
+    data_module = OrliSegmentationDataModule(dm_config)
 
     if params.get('compile'):
         click.echo('Compiling model ', nl=False)

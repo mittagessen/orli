@@ -28,7 +28,9 @@ from collections.abc import Generator
 from orli.configs import OrliSegmentationInferenceConfig, MODEL_VARIANTS
 from orli.fusion import baseline_decoder, OrliHybridNeck, CurveRegressionHead
 from orli.dataset import get_default_transforms
-from orli.modules.bezier import sample_bezier_curve
+from orli.modules.baseline import (DEFAULT_NUM_BASELINE_POINTS,
+                                   baseline_param_dim,
+                                   local_params_to_polyline)
 
 from kraken.models import SegmentationBaseModel
 from kraken.containers import Segmentation, BaselineLine
@@ -59,8 +61,13 @@ class OrliModel(nn.Module, SegmentationBaseModel):
             raise ValueError('config argument is missing in args.')
         if hasattr(config, '__dict__'):
             config = {'anchors': config.anchors,
-                      'model_variant': config.model_variant}
+                      'model_variant': config.model_variant,
+                      'baseline_num_points': getattr(config,
+                                                     'baseline_num_points',
+                                                     DEFAULT_NUM_BASELINE_POINTS)}
         config = dict(config)
+        if config.get('baseline_num_points') is None:
+            config['baseline_num_points'] = DEFAULT_NUM_BASELINE_POINTS
 
         model_variant = config.get('model_variant', 'tiny')
         if model_variant not in MODEL_VARIANTS:
@@ -75,6 +82,9 @@ class OrliModel(nn.Module, SegmentationBaseModel):
 
         if (anchors := config.get('anchors', None)) is None:
             raise ValueError('anchors argument is missing in config.')
+        self.baseline_num_points = int(config.get('baseline_num_points',
+                                                  DEFAULT_NUM_BASELINE_POINTS))
+        self.baseline_dim = baseline_param_dim(self.baseline_num_points)
 
         encoder_name = kwargs['encoder_name']
         encoder_idxs = list(kwargs['encoder_idxs'])
@@ -117,10 +127,12 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                                  dropout=neck_dropout,
                                  fusion_depth=neck_fusion_depth)
 
-        decoder_model = baseline_decoder(encoder_sizes=adapter.output_sizes)
+        decoder_model = baseline_decoder(vocab_size=4 + self.baseline_dim,
+                                         encoder_sizes=adapter.output_sizes)
 
         curve_reg = CurveRegressionHead(embed_dim=decoder_model.tok_embeddings.embed_dim,
                                         num_iterations=len(decoder_model.output_hidden_states) + 1,
+                                        num_baseline_points=self.baseline_num_points,
                                         anchors=anchors)
 
         self.nn = nn.ModuleDict({'encoder': encoder_model,
@@ -302,7 +314,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                           decoder_max_seq_len=max_predicted_lines,
                           dtype=self.m_dtype)
 
-        bos = torch.zeros(12, dtype=self.m_dtype)
+        bos = torch.zeros(4 + self.baseline_dim, dtype=self.m_dtype)
         bos[self.bos_id] = 1.0
         self._prompt = self._fabric.to_device(bos.unsqueeze(0).unsqueeze(0).repeat(self._batch_size, 1, 1))
 
@@ -321,11 +333,13 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         non_empty = curves.abs().sum(dim=-1) > 0
         curves = curves[non_empty]
 
-        if curves.numel():
-            curve_scale = torch.tensor((im.width, im.height) * 4, dtype=curves.dtype, device=curves.device)
-            curves = curves * curve_scale
-
-        sampled = sample_bezier_curve(curves).cpu()
+        sampled = local_params_to_polyline(curves).clamp(0.0, 1.0)
+        if sampled.numel():
+            scale = torch.tensor((im.width, im.height),
+                                 dtype=sampled.dtype,
+                                 device=sampled.device)
+            sampled = sampled * scale
+        sampled = sampled.cpu()
 
         lines = []
         baselines = []
@@ -354,18 +368,17 @@ class OrliModel(nn.Module, SegmentationBaseModel):
     @torch.inference_mode()
     def predict_curves(self, encoder_input: torch.FloatTensor) -> Generator[torch.Tensor, None, None]:
         """
-        Predicts Bézier curves and line classes.
+        Predicts local-frame baseline vectors and line classes.
 
         Args:
             encoder_input: Image input for the encoder with shape ``n x c x h x w``
 
         Returns:
-            A float tensor of with shape ``n x s x 8`` where ``n`` is the batch
-            size, ``s`` is the maximum number of curves detected, and the last
-            dimension is an 8-tuple defining the control points of a cubic
-            Bézier curve. No-output is indicated by zeroed output control
-            points. If s < max_generated_tokens the last entry across all batch
-            items will be a no-output.
+            A float tensor of with shape ``n x s x d`` where ``n`` is the batch
+            size, ``s`` is the maximum number of baselines detected, and ``d``
+            is the local-frame baseline vector width. No-output is indicated by
+            zeroed output vectors. If s < max_generated_tokens the last entry
+            across all batch items will be a no-output.
         """
         logger.info('Computing encoder embeddings')
 
@@ -436,5 +449,5 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                 break
 
         eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
-        eos_curve_mask = eos_token_mask.expand(8, -1, -1).permute(1, 2, 0)
+        eos_curve_mask = eos_token_mask.expand(self.baseline_dim, -1, -1).permute(1, 2, 0)
         return torch.stack(generated_curves, dim=1) * eos_curve_mask

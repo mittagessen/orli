@@ -32,13 +32,13 @@ from kraken.models import create_model
 
 from torchvision.ops import sigmoid_focal_loss
 
-from orli.modules.bezier import sample_bezier_curve
 from orli.dataset import (get_default_transforms, BaselineSegmentationDataset,
                           collate_curves, _validation_worker_init_fn)
 from orli.configs import (OrliSegmentationTrainingConfig,
                           OrliSegmentationTrainingDataConfig,
                           OrliSegmentationTestConfig)
 from orli.metrics import evaluate_page, aggregate_metrics
+from orli.modules.baseline import DEFAULT_NUM_BASELINE_POINTS, local_params_to_polyline
 
 logger = logging.getLogger(__name__)
 CURVE_STATS_INTERVAL = 200
@@ -55,15 +55,18 @@ def _orli_model_kwargs(config, image_size):
 
 
 def _orli_serialized_config(config):
+    baseline_num_points = getattr(config,
+                                  'baseline_num_points',
+                                  DEFAULT_NUM_BASELINE_POINTS) or DEFAULT_NUM_BASELINE_POINTS
     return {'anchors': config.anchors,
-            'model_variant': config.model_variant}
+            'model_variant': config.model_variant,
+            'baseline_num_points': baseline_num_points}
 
 
 def _nearest_anchor_idx_by_geometry(curves: torch.Tensor,
-                                    anchor_table: torch.Tensor,
-                                    num_samples: int = 20) -> torch.Tensor:
-    curve_points = sample_bezier_curve(curves, num_samples=num_samples).flatten(1)
-    anchor_points = sample_bezier_curve(anchor_table, num_samples=num_samples).flatten(1)
+                                    anchor_table: torch.Tensor) -> torch.Tensor:
+    curve_points = local_params_to_polyline(curves).flatten(1)
+    anchor_points = local_params_to_polyline(anchor_table).flatten(1)
     dists = torch.cdist(curve_points, anchor_points, p=1)
     return dists.argmin(dim=-1)
 
@@ -103,6 +106,7 @@ def model_step(model,
 
     tokens = batch['tokens']
     curves = batch['curves']
+    polylines = batch['polylines']
     # shift the tokens to create targets
     ignore_idxs_tokens = torch.full((tokens.shape[0], 1, tokens.shape[2]),
                                     -1,
@@ -110,9 +114,13 @@ def model_step(model,
     ignore_idxs_curves = torch.full((curves.shape[0], 1, curves.shape[2]),
                                     -1,
                                     dtype=curves.dtype, device=curves.device)
+    ignore_idxs_polylines = torch.full((polylines.shape[0], 1, polylines.shape[2]),
+                                       -1,
+                                       dtype=polylines.dtype, device=polylines.device)
 
     target_tokens = torch.hstack((tokens[..., 1:, :], ignore_idxs_tokens))
     target_curves = torch.hstack((curves[..., 1:, :], ignore_idxs_curves))
+    target_polylines = torch.hstack((polylines[..., 1:, :], ignore_idxs_polylines))
 
     valid_tokens_mask = target_tokens[..., 0] != -1
     valid_curves_mask = target_curves[..., 0] != -1
@@ -129,9 +137,9 @@ def model_step(model,
     target_anchor_idx = None
     line_anchor_mask = valid_curves_mask & (target_cls_indices == 3)
     num_anchor_targets = line_anchor_mask.sum().clamp_min(1)
-    anchor_table = regressor.curve_anchors  # [num_anchors, 8]
+    anchor_table = regressor.curve_anchors  # [num_anchors, curve_dim]
     full_anchor_idx = torch.full_like(target_cls_indices, -1)
-    valid_gt = target_curves[line_anchor_mask]  # [M, 8]
+    valid_gt = target_curves[line_anchor_mask]  # [M, curve_dim]
     nearest = _nearest_anchor_idx_by_geometry(valid_gt, anchor_table)
     full_anchor_idx[line_anchor_mask] = nearest
     target_anchor_idx = full_anchor_idx
@@ -152,16 +160,18 @@ def model_step(model,
     # valid targets (computed once)
     batch_target_cls = target_cls_indices[valid_tokens_mask]
     batch_target_curves = target_curves[valid_curves_mask]
+    num_polyline_points = polylines.shape[-1] // 2
+    batch_target_polylines = target_polylines[valid_curves_mask].reshape(batch_target_curves.shape[0],
+                                                                         num_polyline_points,
+                                                                         2)
 
     for pred_curves in logits['curves']:
         pred_curves = pred_curves[valid_curves_mask]
 
-        # sample points from curves
-        pred_points = sample_bezier_curve(pred_curves)
-        target_points = sample_bezier_curve(batch_target_curves)
-        curve_points_loss = curve_criterion(pred_points, target_points) / num_curve_targets
-        curve_ctrl_loss = curve_criterion(pred_curves, batch_target_curves) / num_curve_targets
-        curve_loss = curve_points_loss + curve_ctrl_loss
+        pred_points = local_params_to_polyline(pred_curves)
+        curve_points_loss = curve_criterion(pred_points, batch_target_polylines) / num_curve_targets
+        curve_param_loss = curve_criterion(pred_curves, batch_target_curves) / num_curve_targets
+        curve_loss = curve_points_loss + curve_param_loss
         curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
         final_curve_loss = curve_loss
 
@@ -203,16 +213,21 @@ class OrliSegmentationDataModule(L.LightningDataModule):
 
         im_transforms = get_default_transforms(image_size=data_config.image_size,
                                                normalize=False)
+        baseline_num_points = getattr(data_config,
+                                      'baseline_num_points',
+                                      DEFAULT_NUM_BASELINE_POINTS) or DEFAULT_NUM_BASELINE_POINTS
 
         if data_config.training_data and data_config.evaluation_data:
             self.train_set = BaselineSegmentationDataset(data_config.training_data,
                                                          im_transforms=im_transforms,
                                                          augmentation=data_config.augment,
+                                                         baseline_num_points=baseline_num_points,
                                                          bos_token_id=self.bos_token_id,
                                                          eos_token_id=self.eos_token_id,
                                                          line_token_id=self.line_token_id)
             self.val_set = BaselineSegmentationDataset(data_config.evaluation_data,
                                                        im_transforms=im_transforms,
+                                                       baseline_num_points=baseline_num_points,
                                                        bos_token_id=self.bos_token_id,
                                                        eos_token_id=self.eos_token_id,
                                                        line_token_id=self.line_token_id)
@@ -226,6 +241,7 @@ class OrliSegmentationDataModule(L.LightningDataModule):
         elif data_config.test_data:
             self.test_set = BaselineSegmentationDataset(data_config.test_data,
                                                         im_transforms=im_transforms,
+                                                        baseline_num_points=baseline_num_points,
                                                         bos_token_id=self.bos_token_id,
                                                         eos_token_id=self.eos_token_id,
                                                         line_token_id=self.line_token_id)
@@ -456,7 +472,7 @@ class OrliSegmentationModel(L.LightningModule):
             pred = pred[pred.abs().sum(dim=-1) > 0]
             pred = pred.cpu().float()
 
-            gt = batch['curves'][idx]
+            gt = batch['polylines'][idx]
             if gt.shape[0] > 0:
                 gt = gt[1:]
             gt = gt[gt[..., 0] != -1]

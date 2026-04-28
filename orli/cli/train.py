@@ -122,6 +122,9 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               type=click.Choice(['binary']),
               help='Sets the training data format.')
 @click.option('-is', '--image-size', type=(int, int), help='Network input image size.')
+@click.option('--baseline-num-points',
+              type=click.IntRange(4),
+              help='Number of fixed arc-length baseline points used for local-frame regression.')
 @click.option('--model-variant',
               type=click.Choice(['pico', 'tiny', 'small']),
               help='Model size preset to train.')
