@@ -27,7 +27,6 @@ import logging
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import kendalltau
 
-from orli.modules.bezier import sample_bezier_curve
 from orli.modules.baseline import (LOCAL_BASELINE_PARAM_DIM,
                                    local_params_to_polyline)
 
@@ -254,7 +253,6 @@ def compute_ordering_metrics(matches: list[tuple[int, int]],
 
 def _baseline_vectors_to_polylines(curves: torch.Tensor,
                                    image_size: tuple[int, int],
-                                   num_samples: int = 20,
                                    spacing: float = 5.0,
                                    num_baseline_points: int | None = None) -> list[torch.Tensor]:
     """
@@ -262,11 +260,9 @@ def _baseline_vectors_to_polylines(curves: torch.Tensor,
 
     Args:
         curves: ``(S, D)`` normalized baseline vectors. Supported formats are
-                legacy cubic Bézier control points (D=8), local-frame baseline
-                parameters (D > 8 and D-5 points), and flat fixed polylines
-                (even D > 8).
+                local-frame baseline parameters (D=5+K points) and flat fixed
+                polylines (D=2*K points).
         image_size: ``(width, height)`` used for denormalization.
-        num_samples: Points to sample on legacy Bézier curves.
         spacing: Target spacing for interpolation.
 
     Returns:
@@ -278,10 +274,7 @@ def _baseline_vectors_to_polylines(curves: torch.Tensor,
     w, h = image_size
     point_scale = torch.tensor([w, h], dtype=curves.dtype, device=curves.device)
 
-    if curves.shape[-1] == 8:
-        curve_scale = torch.tensor([w, h] * 4, dtype=curves.dtype, device=curves.device)
-        sampled = sample_bezier_curve(curves * curve_scale, num_samples)  # (S, num_samples, 2)
-    elif num_baseline_points is not None and curves.shape[-1] == 2 * num_baseline_points:
+    if num_baseline_points is not None and curves.shape[-1] == 2 * num_baseline_points:
         sampled = curves.reshape(curves.shape[0], curves.shape[-1] // 2, 2) * point_scale
     elif curves.shape[-1] > LOCAL_BASELINE_PARAM_DIM:
         sampled = local_params_to_polyline(curves, num_points=num_baseline_points).clamp(0.0, 1.0) * point_scale
@@ -301,7 +294,6 @@ def evaluate_page(pred_curves: torch.Tensor,
                   image_size: tuple[int, int],
                   tol: float,
                   match_threshold: float = 0.5,
-                  num_samples: int = 20,
                   spacing: float = 5.0) -> dict[str, float]:
     """
     Full per-page evaluation.
@@ -314,24 +306,21 @@ def evaluate_page(pred_curves: torch.Tensor,
         image_size: (width, height) of the original image.
         tol: Tolerance in pixels.
         match_threshold: Minimum score for ordering evaluation.
-        num_samples: Legacy Bézier sampling density.
         spacing: Polyline interpolation spacing.
 
     Returns:
         Combined dict of detection and ordering metrics.
     """
     num_baseline_points = None
-    if pred_curves.shape[-1] > LOCAL_BASELINE_PARAM_DIM and pred_curves.shape[-1] != 8:
+    if pred_curves.shape[-1] > LOCAL_BASELINE_PARAM_DIM:
         num_baseline_points = pred_curves.shape[-1] - LOCAL_BASELINE_PARAM_DIM
 
     pred_polylines = _baseline_vectors_to_polylines(pred_curves,
                                                     image_size,
-                                                    num_samples,
                                                     spacing,
                                                     num_baseline_points)
     gt_polylines = _baseline_vectors_to_polylines(gt_curves,
                                                   image_size,
-                                                  num_samples,
                                                   spacing,
                                                   num_baseline_points)
 

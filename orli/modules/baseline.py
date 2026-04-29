@@ -32,8 +32,6 @@ import math
 
 import torch
 
-from orli.modules.bezier import sample_bezier_curve
-
 DEFAULT_NUM_BASELINE_POINTS = 16
 LOCAL_BASELINE_PARAM_DIM = 5
 
@@ -92,13 +90,6 @@ def fixed_arc_length_resample(points: torch.Tensor,
         resampled.append(p0 + t.unsqueeze(-1) * (p1 - p0))
 
     return torch.stack(resampled, dim=0).reshape(*orig_shape, num_points, 2)
-
-
-def bezier_to_polyline(curves: torch.Tensor,
-                       num_points: int = DEFAULT_NUM_BASELINE_POINTS,
-                       num_samples: int = 64) -> torch.Tensor:
-    sampled = sample_bezier_curve(curves, num_samples=num_samples)
-    return fixed_arc_length_resample(sampled, num_points=num_points)
 
 
 def polyline_to_local_params(points: torch.Tensor) -> torch.Tensor:
@@ -180,26 +171,17 @@ def local_params_to_polyline(params: torch.Tensor,
     return base + offsets.unsqueeze(-1) * n.unsqueeze(-2)
 
 
-def curve_to_local_params(curves: torch.Tensor,
-                          num_points: int = DEFAULT_NUM_BASELINE_POINTS,
-                          num_samples: int = 64) -> torch.Tensor:
-    points = bezier_to_polyline(curves, num_points=num_points, num_samples=num_samples)
-    return polyline_to_local_params(points)
-
-
 def prepare_baseline_anchors(anchors: torch.Tensor,
                              num_points: int = DEFAULT_NUM_BASELINE_POINTS) -> torch.Tensor:
     """
-    Converts anchor tables in legacy cubic, fixed-polyline, or local-param form
-    to local-frame baseline parameters.
+    Converts anchor tables in fixed-polyline or local-param form to local-frame
+    baseline parameters.
     """
     anchors = anchors.float()
     target_dim = baseline_param_dim(num_points)
     if anchors.shape[-1] == target_dim:
         return anchors.clamp(1e-5, 1.0 - 1e-5)
-    if anchors.shape[-1] == 8:
-        return curve_to_local_params(anchors, num_points=num_points).clamp(1e-5, 1.0 - 1e-5)
     if anchors.shape[-1] == baseline_polyline_dim(num_points):
         points = anchors.reshape(*anchors.shape[:-1], num_points, 2)
         return polyline_to_local_params(points).clamp(1e-5, 1.0 - 1e-5)
-    raise ValueError(f'Unsupported anchor width {anchors.shape[-1]}; expected 8, {baseline_polyline_dim(num_points)}, or {target_dim}.')
+    raise ValueError(f'Unsupported anchor width {anchors.shape[-1]}; expected {baseline_polyline_dim(num_points)} or {target_dim}.')
