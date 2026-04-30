@@ -1,0 +1,26 @@
+precision: bf16-mixed
+device: auto
+num_workers: 16
+num_threads: 1
+train:
+  training_data:
+    - /home/bkiessling/orli_train.lst
+  evaluation_data:
+    - /home/bkiessling/orli_val.lst
+  checkpoint_path: /home/bkiessling/experiments/orli_ablation_03_no_anchor_no_fourier_direct_point
+  optimizer: AdamW
+  epochs: 24
+  lrate: 5e-4
+  schedule: cosine
+  cos_t_max: 24
+  cos_min_lr: 5e-6
+  warmup: 1000
+  augment: true
+  batch_size: 12
+  val_batch_size: 16
+  accumulate_grad_batches: 12
+  pl_logger: wandb
+  model_variant: tiny
+  curve_fourier_features: false
+  anchor_embedding: false
+  direct_point_regression: true
