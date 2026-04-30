@@ -97,6 +97,7 @@ def baseline_decoder(vocab_size: int = 4 + baseline_param_dim(DEFAULT_NUM_BASELI
                      norm_eps: int = 1e-5,
                      rope_base: int = 10000,
                      encoder_sizes: list[tuple[int, int]] = None,  # start of fusion parameters
+                     curve_num_freqs: int = 4,
                      pretrained: Optional[str] = None,
                      **kwargs) -> TransformerDecoder:
     """
@@ -212,7 +213,7 @@ def baseline_decoder(vocab_size: int = 4 + baseline_param_dim(DEFAULT_NUM_BASELI
     line_embeddings = CurveTokenEmbedding(token_dim=token_dim,
                                           curve_dim=curve_dim,
                                           embed_dim=config['embed_dim'],
-                                          num_curve_freqs=4)
+                                          num_curve_freqs=curve_num_freqs)
 
     decoder = TransformerDecoder(tok_embeddings=line_embeddings,
                                  layers=layers,
@@ -668,15 +669,21 @@ class CurveRegressionHead(nn.Module):
                  embed_dim: int = 576,
                  num_layers: int = 3,
                  num_iterations: int = 4,
-                 num_baseline_points: int = DEFAULT_NUM_BASELINE_POINTS):
+                 num_baseline_points: int = DEFAULT_NUM_BASELINE_POINTS,
+                 direct_point_regression: bool = False,
+                 anchor_embedding: bool = True):
         super().__init__()
         if isinstance(anchors, torch.Tensor):
             anchors_t = anchors.float()
         else:
             anchors_t = torch.tensor(anchors, dtype=torch.float32)
-        anchors_t = prepare_baseline_anchors(anchors_t, num_points=num_baseline_points)
+        anchors_t = prepare_baseline_anchors(anchors_t,
+                                             num_points=num_baseline_points,
+                                             direct_point_regression=direct_point_regression)
         self.num_anchors = anchors_t.shape[0]
         self.num_baseline_points = int(num_baseline_points)
+        self.direct_point_regression = bool(direct_point_regression)
+        self.use_anchor_embedding = bool(anchor_embedding)
         self.curve_dim = anchors_t.shape[-1]
         num_cls = 4
         reg_hidden_dim = scale_hidden_dim_for_mlp(embed_dim)
@@ -703,7 +710,10 @@ class CurveRegressionHead(nn.Module):
                                                                  dtype=reg_input_proj.weight.dtype))
             reg_input_proj.weight[:, embed_dim:].normal_(std=1e-3)
         self.anchor_proj = nn.Linear(embed_dim, self.num_anchors)
-        self.anchor_embeddings = nn.Embedding(self.num_anchors, embed_dim)
+        if self.use_anchor_embedding:
+            self.anchor_embeddings = nn.Embedding(self.num_anchors, embed_dim)
+        else:
+            self.anchor_embeddings = None
         self.curve_state_proj = nn.Linear(self.curve_dim, embed_dim, bias=False)
         self.reg_input_projs = _get_clones(reg_input_proj, num_iterations)
         self.reg_projs = _get_clones(reg_proj, num_iterations)
@@ -736,7 +746,10 @@ class CurveRegressionHead(nn.Module):
         else:
             anchor_idx = anchor_logits.argmax(-1)  # [b, s]
         init_curves = self.curve_anchors[anchor_idx]  # [b, s, curve_dim]
-        anchor_cond = self.anchor_embeddings(anchor_idx)
+        if self.use_anchor_embedding:
+            anchor_cond = self.anchor_embeddings(anchor_idx)
+        else:
+            anchor_cond = torch.zeros_like(h0)
 
         _curves: list[torch.Tensor] = [init_curves]
         _logits: list[torch.Tensor] = []

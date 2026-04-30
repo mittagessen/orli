@@ -28,6 +28,7 @@ from scipy.optimize import linear_sum_assignment
 from scipy.stats import kendalltau
 
 from orli.modules.baseline import (LOCAL_BASELINE_PARAM_DIM,
+                                   baseline_polyline_dim,
                                    local_params_to_polyline)
 
 logger = logging.getLogger(__name__)
@@ -294,7 +295,9 @@ def evaluate_page(pred_curves: torch.Tensor,
                   image_size: tuple[int, int],
                   tol: float,
                   match_threshold: float = 0.5,
-                  spacing: float = 5.0) -> dict[str, float]:
+                  spacing: float = 5.0,
+                  num_baseline_points: int | None = None,
+                  direct_point_regression: bool = False) -> dict[str, float]:
     """
     Full per-page evaluation.
 
@@ -307,13 +310,29 @@ def evaluate_page(pred_curves: torch.Tensor,
         tol: Tolerance in pixels.
         match_threshold: Minimum score for ordering evaluation.
         spacing: Polyline interpolation spacing.
+        num_baseline_points: Fixed baseline point count. Required to
+                             disambiguate direct point vectors from long
+                             local-frame vectors.
+        direct_point_regression: Interpret predicted curves as direct fixed
+                                 point vectors when inferring point count.
 
     Returns:
         Combined dict of detection and ordering metrics.
     """
-    num_baseline_points = None
-    if pred_curves.shape[-1] > LOCAL_BASELINE_PARAM_DIM:
-        num_baseline_points = pred_curves.shape[-1] - LOCAL_BASELINE_PARAM_DIM
+    if num_baseline_points is None and pred_curves.shape[-1] > LOCAL_BASELINE_PARAM_DIM:
+        if direct_point_regression:
+            if pred_curves.shape[-1] % 2 != 0:
+                raise ValueError(f'Expected an even direct point vector width, got {pred_curves.shape[-1]}.')
+            num_baseline_points = pred_curves.shape[-1] // 2
+        else:
+            num_baseline_points = pred_curves.shape[-1] - LOCAL_BASELINE_PARAM_DIM
+    elif num_baseline_points is not None:
+        num_baseline_points = int(num_baseline_points)
+
+    if direct_point_regression and num_baseline_points is not None:
+        expected = baseline_polyline_dim(num_baseline_points)
+        if pred_curves.numel() and pred_curves.shape[-1] != expected:
+            raise ValueError(f'Expected direct point curve dim {expected}, got {pred_curves.shape[-1]}.')
 
     pred_polylines = _baseline_vectors_to_polylines(pred_curves,
                                                     image_size,

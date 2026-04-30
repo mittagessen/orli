@@ -36,10 +36,10 @@ from PIL import Image
 from torch.utils.data import default_collate
 
 from orli.modules.baseline import (DEFAULT_NUM_BASELINE_POINTS,
-                                   baseline_param_dim,
                                    baseline_polyline_dim,
+                                   curve_vector_dim,
                                    fixed_arc_length_resample,
-                                   polyline_to_local_params)
+                                   polyline_to_curve_vector)
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -239,6 +239,7 @@ class BaselineSegmentationDataset(Dataset):
                  augmentation: bool = False,
                  max_lines_per_page: int = 768,
                  baseline_num_points: int = DEFAULT_NUM_BASELINE_POINTS,
+                 direct_point_regression: bool = False,
                  bos_token_id: int = 1,
                  eos_token_id: int = 2,
                  line_token_id: int = 3) -> None:
@@ -249,7 +250,9 @@ class BaselineSegmentationDataset(Dataset):
         self.max_lines_in_page = 0
         self.max_lines_per_page = max_lines_per_page
         self.baseline_num_points = int(baseline_num_points)
-        self.baseline_dim = baseline_param_dim(self.baseline_num_points)
+        self.direct_point_regression = bool(direct_point_regression)
+        self.baseline_dim = curve_vector_dim(self.baseline_num_points,
+                                             self.direct_point_regression)
         self.polyline_dim = baseline_polyline_dim(self.baseline_num_points)
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
@@ -306,7 +309,8 @@ class BaselineSegmentationDataset(Dataset):
                 raise ValueError(f'Expected polyline with shape [n, 2], got {tuple(source_points.shape)}.')
             points = fixed_arc_length_resample(source_points.reshape(-1, 2).clamp(0.0, 1.0),
                                                num_points=self.baseline_num_points)
-            params = polyline_to_local_params(points)
+            params = polyline_to_curve_vector(points,
+                                              direct_point_regression=self.direct_point_regression)
             polylines.append(points.reshape(self.polyline_dim))
             lines.append(params)
 

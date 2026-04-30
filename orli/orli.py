@@ -29,8 +29,8 @@ from orli.configs import OrliSegmentationInferenceConfig, MODEL_VARIANTS
 from orli.fusion import baseline_decoder, OrliHybridNeck, CurveRegressionHead
 from orli.dataset import get_default_transforms
 from orli.modules.baseline import (DEFAULT_NUM_BASELINE_POINTS,
-                                   baseline_param_dim,
-                                   local_params_to_polyline)
+                                   curve_vector_dim,
+                                   curve_vector_to_polyline)
 
 from kraken.models import SegmentationBaseModel
 from kraken.containers import Segmentation, BaselineLine
@@ -64,10 +64,25 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                       'model_variant': config.model_variant,
                       'baseline_num_points': getattr(config,
                                                      'baseline_num_points',
-                                                     DEFAULT_NUM_BASELINE_POINTS)}
+                                                     DEFAULT_NUM_BASELINE_POINTS),
+                      'curve_fourier_features': getattr(config,
+                                                        'curve_fourier_features',
+                                                        True),
+                      'anchor_embedding': getattr(config,
+                                                  'anchor_embedding',
+                                                  True),
+                      'direct_point_regression': getattr(config,
+                                                         'direct_point_regression',
+                                                         False)}
         config = dict(config)
         if config.get('baseline_num_points') is None:
             config['baseline_num_points'] = DEFAULT_NUM_BASELINE_POINTS
+        if config.get('curve_fourier_features') is None:
+            config['curve_fourier_features'] = True
+        if config.get('anchor_embedding') is None:
+            config['anchor_embedding'] = True
+        if config.get('direct_point_regression') is None:
+            config['direct_point_regression'] = False
 
         model_variant = config.get('model_variant', 'tiny')
         if model_variant not in MODEL_VARIANTS:
@@ -84,7 +99,9 @@ class OrliModel(nn.Module, SegmentationBaseModel):
             raise ValueError('anchors argument is missing in config.')
         self.baseline_num_points = int(config.get('baseline_num_points',
                                                   DEFAULT_NUM_BASELINE_POINTS))
-        self.baseline_dim = baseline_param_dim(self.baseline_num_points)
+        self.direct_point_regression = bool(config.get('direct_point_regression', False))
+        self.baseline_dim = curve_vector_dim(self.baseline_num_points,
+                                             self.direct_point_regression)
 
         encoder_name = kwargs['encoder_name']
         encoder_idxs = list(kwargs['encoder_idxs'])
@@ -128,11 +145,14 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                                  fusion_depth=neck_fusion_depth)
 
         decoder_model = baseline_decoder(vocab_size=4 + self.baseline_dim,
-                                         encoder_sizes=adapter.output_sizes)
+                                         encoder_sizes=adapter.output_sizes,
+                                         curve_num_freqs=4 if config.get('curve_fourier_features', True) else 0)
 
         curve_reg = CurveRegressionHead(embed_dim=decoder_model.tok_embeddings.embed_dim,
                                         num_iterations=len(decoder_model.output_hidden_states) + 1,
                                         num_baseline_points=self.baseline_num_points,
+                                        direct_point_regression=self.direct_point_regression,
+                                        anchor_embedding=config.get('anchor_embedding', True),
                                         anchors=anchors)
 
         self.nn = nn.ModuleDict({'encoder': encoder_model,
@@ -333,7 +353,9 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         non_empty = curves.abs().sum(dim=-1) > 0
         curves = curves[non_empty]
 
-        sampled = local_params_to_polyline(curves).clamp(0.0, 1.0)
+        sampled = curve_vector_to_polyline(curves,
+                                           direct_point_regression=self.direct_point_regression,
+                                           num_points=self.baseline_num_points).clamp(0.0, 1.0)
         if sampled.numel():
             scale = torch.tensor((im.width, im.height),
                                  dtype=sampled.dtype,

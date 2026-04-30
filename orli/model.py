@@ -38,7 +38,7 @@ from orli.configs import (OrliSegmentationTrainingConfig,
                           OrliSegmentationTrainingDataConfig,
                           OrliSegmentationTestConfig)
 from orli.metrics import evaluate_page, aggregate_metrics
-from orli.modules.baseline import DEFAULT_NUM_BASELINE_POINTS, local_params_to_polyline
+from orli.modules.baseline import DEFAULT_NUM_BASELINE_POINTS, curve_vector_to_polyline
 
 logger = logging.getLogger(__name__)
 CURVE_STATS_INTERVAL = 200
@@ -60,13 +60,22 @@ def _orli_serialized_config(config):
                                   DEFAULT_NUM_BASELINE_POINTS) or DEFAULT_NUM_BASELINE_POINTS
     return {'anchors': config.anchors,
             'model_variant': config.model_variant,
-            'baseline_num_points': baseline_num_points}
+            'baseline_num_points': baseline_num_points,
+            'curve_fourier_features': getattr(config, 'curve_fourier_features', True),
+            'anchor_embedding': getattr(config, 'anchor_embedding', True),
+            'direct_point_regression': getattr(config, 'direct_point_regression', False)}
 
 
 def _nearest_anchor_idx_by_geometry(curves: torch.Tensor,
-                                    anchor_table: torch.Tensor) -> torch.Tensor:
-    curve_points = local_params_to_polyline(curves).flatten(1)
-    anchor_points = local_params_to_polyline(anchor_table).flatten(1)
+                                    anchor_table: torch.Tensor,
+                                    direct_point_regression: bool,
+                                    num_points: int) -> torch.Tensor:
+    curve_points = curve_vector_to_polyline(curves,
+                                            direct_point_regression=direct_point_regression,
+                                            num_points=num_points).flatten(1)
+    anchor_points = curve_vector_to_polyline(anchor_table,
+                                             direct_point_regression=direct_point_regression,
+                                             num_points=num_points).flatten(1)
     dists = torch.cdist(curve_points, anchor_points, p=1)
     return dists.argmin(dim=-1)
 
@@ -140,7 +149,12 @@ def model_step(model,
     anchor_table = regressor.curve_anchors  # [num_anchors, curve_dim]
     full_anchor_idx = torch.full_like(target_cls_indices, -1)
     valid_gt = target_curves[line_anchor_mask]  # [M, curve_dim]
-    nearest = _nearest_anchor_idx_by_geometry(valid_gt, anchor_table)
+    direct_point_regression = getattr(regressor, 'direct_point_regression', False)
+    baseline_num_points = getattr(regressor, 'num_baseline_points', DEFAULT_NUM_BASELINE_POINTS)
+    nearest = _nearest_anchor_idx_by_geometry(valid_gt,
+                                             anchor_table,
+                                             direct_point_regression,
+                                             baseline_num_points)
     full_anchor_idx[line_anchor_mask] = nearest
     target_anchor_idx = full_anchor_idx
 
@@ -168,10 +182,15 @@ def model_step(model,
     for pred_curves in logits['curves']:
         pred_curves = pred_curves[valid_curves_mask]
 
-        pred_points = local_params_to_polyline(pred_curves)
+        pred_points = curve_vector_to_polyline(pred_curves,
+                                               direct_point_regression=direct_point_regression,
+                                               num_points=baseline_num_points)
         curve_points_loss = curve_criterion(pred_points, batch_target_polylines) / num_curve_targets
         curve_param_loss = curve_criterion(pred_curves, batch_target_curves) / num_curve_targets
-        curve_loss = curve_points_loss + curve_param_loss
+        if direct_point_regression:
+            curve_loss = curve_points_loss
+        else:
+            curve_loss = curve_points_loss + curve_param_loss
         curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
         final_curve_loss = curve_loss
 
@@ -216,18 +235,23 @@ class OrliSegmentationDataModule(L.LightningDataModule):
         baseline_num_points = getattr(data_config,
                                       'baseline_num_points',
                                       DEFAULT_NUM_BASELINE_POINTS) or DEFAULT_NUM_BASELINE_POINTS
+        direct_point_regression = getattr(data_config,
+                                          'direct_point_regression',
+                                          False)
 
         if data_config.training_data and data_config.evaluation_data:
             self.train_set = BaselineSegmentationDataset(data_config.training_data,
                                                          im_transforms=im_transforms,
                                                          augmentation=data_config.augment,
                                                          baseline_num_points=baseline_num_points,
+                                                         direct_point_regression=direct_point_regression,
                                                          bos_token_id=self.bos_token_id,
                                                          eos_token_id=self.eos_token_id,
                                                          line_token_id=self.line_token_id)
             self.val_set = BaselineSegmentationDataset(data_config.evaluation_data,
                                                        im_transforms=im_transforms,
                                                        baseline_num_points=baseline_num_points,
+                                                       direct_point_regression=direct_point_regression,
                                                        bos_token_id=self.bos_token_id,
                                                        eos_token_id=self.eos_token_id,
                                                        line_token_id=self.line_token_id)
@@ -242,6 +266,7 @@ class OrliSegmentationDataModule(L.LightningDataModule):
             self.test_set = BaselineSegmentationDataset(data_config.test_data,
                                                         im_transforms=im_transforms,
                                                         baseline_num_points=baseline_num_points,
+                                                        direct_point_regression=direct_point_regression,
                                                         bos_token_id=self.bos_token_id,
                                                         eos_token_id=self.eos_token_id,
                                                         line_token_id=self.line_token_id)
@@ -482,7 +507,13 @@ class OrliSegmentationModel(L.LightningModule):
                                     gt_curves=gt,
                                     image_size=image_size,
                                     tol=self.test_tolerance,
-                                    match_threshold=self.test_match_threshold)
+                                    match_threshold=self.test_match_threshold,
+                                    num_baseline_points=getattr(self.net,
+                                                                'baseline_num_points',
+                                                                None),
+                                    direct_point_regression=getattr(self.net,
+                                                                    'direct_point_regression',
+                                                                    False))
             self._test_page_metrics.append(metrics)
 
     def on_test_epoch_end(self):

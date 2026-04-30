@@ -44,6 +44,16 @@ def baseline_polyline_dim(num_points: int = DEFAULT_NUM_BASELINE_POINTS) -> int:
     return 2 * int(num_points)
 
 
+def curve_vector_dim(num_points: int = DEFAULT_NUM_BASELINE_POINTS,
+                     direct_point_regression: bool = False) -> int:
+    """
+    Returns the trainable curve vector width for the selected representation.
+    """
+    if direct_point_regression:
+        return baseline_polyline_dim(num_points)
+    return baseline_param_dim(num_points)
+
+
 def fixed_arc_length_resample(points: torch.Tensor,
                               num_points: int = DEFAULT_NUM_BASELINE_POINTS) -> torch.Tensor:
     """
@@ -171,17 +181,56 @@ def local_params_to_polyline(params: torch.Tensor,
     return base + offsets.unsqueeze(-1) * n.unsqueeze(-2)
 
 
-def prepare_baseline_anchors(anchors: torch.Tensor,
-                             num_points: int = DEFAULT_NUM_BASELINE_POINTS) -> torch.Tensor:
+def polyline_to_curve_vector(points: torch.Tensor,
+                             direct_point_regression: bool = False) -> torch.Tensor:
     """
-    Converts anchor tables in fixed-polyline or local-param form to local-frame
-    baseline parameters.
+    Encodes fixed-size polylines in the selected trainable representation.
+    """
+    if direct_point_regression:
+        return points.clamp(0.0, 1.0).reshape(*points.shape[:-2], points.shape[-2] * 2)
+    return polyline_to_local_params(points)
+
+
+def curve_vector_to_polyline(curves: torch.Tensor,
+                             direct_point_regression: bool = False,
+                             num_points: int | None = None) -> torch.Tensor:
+    """
+    Decodes trainable curve vectors to fixed-size normalized polylines.
+    """
+    if direct_point_regression:
+        if num_points is None:
+            if curves.shape[-1] % 2 != 0:
+                raise ValueError(f'Expected an even direct point vector width, got {curves.shape[-1]}.')
+            num_points = curves.shape[-1] // 2
+        expected = baseline_polyline_dim(num_points)
+        if curves.shape[-1] != expected:
+            raise ValueError(f'Expected direct point curve dim {expected}, got {curves.shape[-1]}.')
+        return curves.reshape(*curves.shape[:-1], num_points, 2)
+    return local_params_to_polyline(curves, num_points=num_points)
+
+
+def prepare_baseline_anchors(anchors: torch.Tensor,
+                             num_points: int = DEFAULT_NUM_BASELINE_POINTS,
+                             direct_point_regression: bool = False) -> torch.Tensor:
+    """
+    Converts anchor tables in fixed-polyline or local-param form to the selected
+    trainable curve representation.
     """
     anchors = anchors.float()
-    target_dim = baseline_param_dim(num_points)
-    if anchors.shape[-1] == target_dim:
-        return anchors.clamp(1e-5, 1.0 - 1e-5)
-    if anchors.shape[-1] == baseline_polyline_dim(num_points):
-        points = anchors.reshape(*anchors.shape[:-1], num_points, 2)
-        return polyline_to_local_params(points).clamp(1e-5, 1.0 - 1e-5)
-    raise ValueError(f'Unsupported anchor width {anchors.shape[-1]}; expected {baseline_polyline_dim(num_points)} or {target_dim}.')
+    local_dim = baseline_param_dim(num_points)
+    point_dim = baseline_polyline_dim(num_points)
+
+    if direct_point_regression:
+        if anchors.shape[-1] == point_dim:
+            return anchors.clamp(1e-5, 1.0 - 1e-5)
+        if anchors.shape[-1] == local_dim:
+            points = local_params_to_polyline(anchors, num_points=num_points)
+            return points.reshape(*points.shape[:-2], point_dim).clamp(1e-5, 1.0 - 1e-5)
+    else:
+        if anchors.shape[-1] == local_dim:
+            return anchors.clamp(1e-5, 1.0 - 1e-5)
+        if anchors.shape[-1] == point_dim:
+            points = anchors.reshape(*anchors.shape[:-1], num_points, 2)
+            return polyline_to_local_params(points).clamp(1e-5, 1.0 - 1e-5)
+
+    raise ValueError(f'Unsupported anchor width {anchors.shape[-1]}; expected {point_dim} or {local_dim}.')

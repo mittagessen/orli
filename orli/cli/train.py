@@ -124,10 +124,19 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
 @click.option('-is', '--image-size', type=(int, int), help='Network input image size.')
 @click.option('--baseline-num-points',
               type=click.IntRange(4),
-              help='Number of fixed arc-length baseline points used for local-frame regression.')
+              help='Number of fixed arc-length baseline points used for curve regression.')
 @click.option('--model-variant',
               type=click.Choice(['pico', 'tiny', 'small']),
               help='Model size preset to train.')
+@click.option('--curve-fourier-features/--no-curve-fourier-features',
+              default=None,
+              help='Enable Fourier features for previous curve inputs.')
+@click.option('--anchor-embedding/--no-anchor-embedding',
+              default=None,
+              help='Condition curve refinement on a learned anchor embedding.')
+@click.option('--direct-point-regression/--local-frame-regression',
+              default=None,
+              help='Regress fixed baseline points directly instead of local-frame curve parameters.')
 @click.option('--augment/--no-augment', help='Enable image augmentation')
 @click.option('--logger',
               'pl_logger',
