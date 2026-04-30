@@ -24,7 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "kraken~=7.0.0b5",
+    "kraken~=7.0.2",
     "timm",
     "python-bidi",
     "rich",
