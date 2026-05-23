@@ -209,6 +209,87 @@ def curve_vector_to_polyline(curves: torch.Tensor,
     return local_params_to_polyline(curves, num_points=num_points)
 
 
+def add_curve_noise(curves: torch.Tensor,
+                    image_size: tuple[int, int],
+                    *,
+                    direct_point_regression: bool = False,
+                    num_points: int = DEFAULT_NUM_BASELINE_POINTS,
+                    mask: torch.Tensor | None = None,
+                    prob: float = 1.0,
+                    normal_px: float = 0.0,
+                    tangent_px: float = 0.0,
+                    curvature_px: float = 0.0) -> torch.Tensor:
+    """
+    Perturbs curve vectors by applying smooth pixel-space polyline noise.
+
+    Noise is sampled in image coordinates, decomposed into tangent and normal
+    directions at each baseline point, and re-encoded into the active trainable
+    curve representation. ``normal_px`` and ``tangent_px`` shift the whole line;
+    ``curvature_px`` adds a smooth normal displacement that is zero at both
+    endpoints and largest near the line center.
+    """
+    if prob <= 0.0 or max(normal_px, tangent_px, curvature_px) <= 0.0:
+        return curves
+
+    if num_points < 2:
+        return curves
+
+    orig_dtype = curves.dtype
+    work_dtype = torch.float32
+    points = curve_vector_to_polyline(curves.to(dtype=work_dtype),
+                                      direct_point_regression=direct_point_regression,
+                                      num_points=num_points).clamp(0.0, 1.0)
+    scale = torch.tensor([float(image_size[0]), float(image_size[1])],
+                         dtype=work_dtype,
+                         device=curves.device)
+    points_px = points * scale.view(*([1] * (points.ndim - 1)), 2)
+
+    first = points_px[..., 1:2, :] - points_px[..., 0:1, :]
+    middle = points_px[..., 2:, :] - points_px[..., :-2, :]
+    last = points_px[..., -1:, :] - points_px[..., -2:-1, :]
+    tangents = torch.cat([first, middle, last], dim=-2)
+    tangents = tangents / torch.linalg.vector_norm(tangents,
+                                                   dim=-1,
+                                                   keepdim=True).clamp_min(1e-6)
+    normals = torch.stack([-tangents[..., 1], tangents[..., 0]], dim=-1)
+
+    line_shape = curves.shape[:-1]
+    if mask is None:
+        sample_mask = torch.ones(line_shape, dtype=torch.bool, device=curves.device)
+    else:
+        sample_mask = mask.to(device=curves.device, dtype=torch.bool)
+    if prob < 1.0:
+        sample_mask = sample_mask & (torch.rand(line_shape, device=curves.device) < prob)
+
+    noise_shape = (*line_shape, 1, 1)
+    normal_noise = torch.zeros(noise_shape, dtype=work_dtype, device=curves.device)
+    tangent_noise = torch.zeros(noise_shape, dtype=work_dtype, device=curves.device)
+    if normal_px > 0.0:
+        normal_noise = normal_noise + torch.randn(noise_shape,
+                                                  dtype=work_dtype,
+                                                  device=curves.device) * normal_px
+    if tangent_px > 0.0:
+        tangent_noise = tangent_noise + torch.randn(noise_shape,
+                                                    dtype=work_dtype,
+                                                    device=curves.device) * tangent_px
+    if curvature_px > 0.0:
+        s = torch.linspace(-1.0, 1.0, num_points, dtype=work_dtype, device=curves.device)
+        basis = (1.0 - s.square()).view(*([1] * len(line_shape)), num_points, 1)
+        normal_noise = normal_noise + (torch.randn(noise_shape,
+                                                   dtype=work_dtype,
+                                                   device=curves.device) *
+                                       curvature_px *
+                                       basis)
+
+    apply_mask = sample_mask.to(dtype=work_dtype).view(*line_shape, 1, 1)
+    noisy_points_px = points_px + apply_mask * (tangents * tangent_noise +
+                                                normals * normal_noise)
+    noisy_points = (noisy_points_px / scale.view(*([1] * (points.ndim - 1)), 2)).clamp(0.0, 1.0)
+    noisy_curves = polyline_to_curve_vector(noisy_points,
+                                            direct_point_regression=direct_point_regression)
+    return torch.where(sample_mask.unsqueeze(-1), noisy_curves.to(dtype=orig_dtype), curves)
+
+
 def prepare_baseline_anchors(anchors: torch.Tensor,
                              num_points: int = DEFAULT_NUM_BASELINE_POINTS,
                              direct_point_regression: bool = False) -> torch.Tensor:

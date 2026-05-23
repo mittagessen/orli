@@ -38,7 +38,9 @@ from orli.configs import (OrliSegmentationTrainingConfig,
                           OrliSegmentationTrainingDataConfig,
                           OrliSegmentationTestConfig)
 from orli.metrics import evaluate_page, aggregate_metrics
-from orli.modules.baseline import DEFAULT_NUM_BASELINE_POINTS, curve_vector_to_polyline
+from orli.modules.baseline import (DEFAULT_NUM_BASELINE_POINTS,
+                                   add_curve_noise,
+                                   curve_vector_to_polyline)
 
 logger = logging.getLogger(__name__)
 CURVE_STATS_INTERVAL = 200
@@ -63,7 +65,16 @@ def _orli_serialized_config(config):
             'baseline_num_points': baseline_num_points,
             'curve_fourier_features': getattr(config, 'curve_fourier_features', True),
             'anchor_embedding': getattr(config, 'anchor_embedding', True),
-            'direct_point_regression': getattr(config, 'direct_point_regression', False)}
+            'line_refiner': getattr(config, 'line_refiner', False),
+            'direct_point_regression': getattr(config, 'direct_point_regression', False),
+            'curve_prompt_noise_prob': getattr(config, 'curve_prompt_noise_prob', 0.0),
+            'curve_prompt_noise_normal_px': getattr(config, 'curve_prompt_noise_normal_px', 0.0),
+            'curve_prompt_noise_tangent_px': getattr(config, 'curve_prompt_noise_tangent_px', 0.0),
+            'curve_prompt_noise_curvature_px': getattr(config, 'curve_prompt_noise_curvature_px', 0.0),
+            'pre_refiner_noise_prob': getattr(config, 'pre_refiner_noise_prob', 0.0),
+            'pre_refiner_noise_normal_px': getattr(config, 'pre_refiner_noise_normal_px', 0.0),
+            'pre_refiner_noise_tangent_px': getattr(config, 'pre_refiner_noise_tangent_px', 0.0),
+            'pre_refiner_noise_curvature_px': getattr(config, 'pre_refiner_noise_curvature_px', 0.0)}
 
 
 def _nearest_anchor_idx_by_geometry(curves: torch.Tensor,
@@ -113,8 +124,8 @@ def model_step(model,
                curve_criterion,
                batch):
 
-    tokens = batch['tokens']
-    curves = batch['curves']
+    tokens = batch['tokens'].clone()
+    curves = batch['curves'].clone()
     polylines = batch['polylines']
     # shift the tokens to create targets
     ignore_idxs_tokens = torch.full((tokens.shape[0], 1, tokens.shape[2]),
@@ -160,6 +171,17 @@ def model_step(model,
 
     # our tokens already contain BOS/EOS tokens so we just run it
     # through the model after replacing ignored indices.
+    if model.training and getattr(regressor, 'curve_prompt_noise_prob', 0.0) > 0.0:
+        prompt_line_mask = (tokens[..., 3] == 1) & (curves[..., 0] != -1)
+        curves = add_curve_noise(curves,
+                                 (batch['image'].shape[-1], batch['image'].shape[-2]),
+                                 direct_point_regression=direct_point_regression,
+                                 num_points=baseline_num_points,
+                                 mask=prompt_line_mask,
+                                 prob=getattr(regressor, 'curve_prompt_noise_prob', 0.0),
+                                 normal_px=getattr(regressor, 'curve_prompt_noise_normal_px', 0.0),
+                                 tangent_px=getattr(regressor, 'curve_prompt_noise_tangent_px', 0.0),
+                                 curvature_px=getattr(regressor, 'curve_prompt_noise_curvature_px', 0.0))
     tokens.masked_fill_(tokens == -1.0, 0)
     curves.masked_fill_(curves == -1.0, 0)
 
@@ -490,6 +512,10 @@ class OrliSegmentationModel(L.LightningModule):
         if pred_curves.dim() == 2:
             pred_curves = pred_curves.unsqueeze(0)
 
+        eos_reached = getattr(self.net, '_last_eos_reached', None)
+        if eos_reached is not None:
+            eos_reached = eos_reached.detach().cpu()
+
         image_size = (images.shape[-1], images.shape[-2])
 
         for idx in range(images.shape[0]):
@@ -514,6 +540,10 @@ class OrliSegmentationModel(L.LightningModule):
                                     direct_point_regression=getattr(self.net,
                                                                     'direct_point_regression',
                                                                     False))
+            if eos_reached is not None and idx < eos_reached.numel():
+                metrics['truncated'] = bool(not eos_reached[idx].item())
+            else:
+                metrics['truncated'] = False
             self._test_page_metrics.append(metrics)
 
     def on_test_epoch_end(self):

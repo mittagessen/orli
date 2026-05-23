@@ -137,6 +137,30 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
 @click.option('--direct-point-regression/--local-frame-regression',
               default=None,
               help='Regress fixed baseline points directly instead of local-frame curve parameters.')
+@click.option('--curve-prompt-noise-prob',
+              type=click.FloatRange(0.0, 1.0),
+              help='Probability of corrupting each line curve prompt during training.')
+@click.option('--curve-prompt-noise-normal-px',
+              type=float,
+              help='Stddev of line-wise normal curve prompt noise in input pixels.')
+@click.option('--curve-prompt-noise-tangent-px',
+              type=float,
+              help='Stddev of line-wise tangent curve prompt noise in input pixels.')
+@click.option('--curve-prompt-noise-curvature-px',
+              type=float,
+              help='Stddev of smooth center-weighted normal curve prompt noise in input pixels.')
+@click.option('--pre-refiner-noise-prob',
+              type=click.FloatRange(0.0, 1.0),
+              help='Probability of corrupting each candidate curve before local refiner training.')
+@click.option('--pre-refiner-noise-normal-px',
+              type=float,
+              help='Stddev of line-wise pre-refiner normal noise in input pixels.')
+@click.option('--pre-refiner-noise-tangent-px',
+              type=float,
+              help='Stddev of line-wise pre-refiner tangent noise in input pixels.')
+@click.option('--pre-refiner-noise-curvature-px',
+              type=float,
+              help='Stddev of smooth center-weighted pre-refiner normal noise in input pixels.')
 @click.option('--augment/--no-augment', help='Enable image augmentation')
 @click.option('--logger',
               'pl_logger',

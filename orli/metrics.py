@@ -393,11 +393,26 @@ def aggregate_metrics(page_metrics: list[dict[str, float]]) -> dict[str, float]:
     spearman_footrule = sum(footrule_vals) / len(footrule_vals) if footrule_vals else float('nan')
     kendall_tau_val = sum(tau_vals) / len(tau_vals) if tau_vals else float('nan')
 
+    # Matched-line coverage: ratio of pairs surviving the score threshold to
+    # the GT / pred line counts. Indicates how much of the page the τ and
+    # footrule numbers actually describe.
+    gt_cov_vals = [m['num_matched_for_ordering'] / m['num_gt']
+                   for m in page_metrics if m.get('num_gt')]
+    pred_cov_vals = [m['num_matched_for_ordering'] / m['num_pred']
+                     for m in page_metrics if m.get('num_pred')]
+    gt_coverage = sum(gt_cov_vals) / len(gt_cov_vals) if gt_cov_vals else float('nan')
+    pred_coverage = sum(pred_cov_vals) / len(pred_cov_vals) if pred_cov_vals else float('nan')
+
+    truncated_count = sum(1 for m in page_metrics if m.get('truncated'))
+
     return {'precision': precision,
             'recall': recall,
             'f1': f1,
             'spearman_footrule': spearman_footrule,
             'kendall_tau': kendall_tau_val,
+            'gt_coverage': gt_coverage,
+            'pred_coverage': pred_coverage,
             'avg_num_pred': avg_num_pred,
             'avg_num_gt': avg_num_gt,
-            'num_pages': n}
+            'num_pages': n,
+            'truncated_pages': truncated_count}

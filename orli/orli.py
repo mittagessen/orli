@@ -71,18 +71,58 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                       'anchor_embedding': getattr(config,
                                                   'anchor_embedding',
                                                   True),
+                      'line_refiner': getattr(config,
+                                              'line_refiner',
+                                              False),
                       'direct_point_regression': getattr(config,
                                                          'direct_point_regression',
-                                                         False)}
+                                                         False),
+                      'curve_prompt_noise_prob': getattr(config,
+                                                         'curve_prompt_noise_prob',
+                                                         0.0),
+                      'curve_prompt_noise_normal_px': getattr(config,
+                                                              'curve_prompt_noise_normal_px',
+                                                              0.0),
+                      'curve_prompt_noise_tangent_px': getattr(config,
+                                                               'curve_prompt_noise_tangent_px',
+                                                               0.0),
+                      'curve_prompt_noise_curvature_px': getattr(config,
+                                                                 'curve_prompt_noise_curvature_px',
+                                                                 0.0),
+                      'pre_refiner_noise_prob': getattr(config,
+                                                        'pre_refiner_noise_prob',
+                                                        0.0),
+                      'pre_refiner_noise_normal_px': getattr(config,
+                                                             'pre_refiner_noise_normal_px',
+                                                             0.0),
+                      'pre_refiner_noise_tangent_px': getattr(config,
+                                                              'pre_refiner_noise_tangent_px',
+                                                              0.0),
+                      'pre_refiner_noise_curvature_px': getattr(config,
+                                                                'pre_refiner_noise_curvature_px',
+                                                                0.0)}
         config = dict(config)
+        config.pop('soft_anchors', None)
         if config.get('baseline_num_points') is None:
             config['baseline_num_points'] = DEFAULT_NUM_BASELINE_POINTS
         if config.get('curve_fourier_features') is None:
             config['curve_fourier_features'] = True
         if config.get('anchor_embedding') is None:
             config['anchor_embedding'] = True
+        if config.get('line_refiner') is None:
+            config['line_refiner'] = False
         if config.get('direct_point_regression') is None:
             config['direct_point_regression'] = False
+        for key in ('curve_prompt_noise_prob',
+                    'curve_prompt_noise_normal_px',
+                    'curve_prompt_noise_tangent_px',
+                    'curve_prompt_noise_curvature_px',
+                    'pre_refiner_noise_prob',
+                    'pre_refiner_noise_normal_px',
+                    'pre_refiner_noise_tangent_px',
+                    'pre_refiner_noise_curvature_px'):
+            if config.get(key) is None:
+                config[key] = 0.0
 
         model_variant = config.get('model_variant', 'tiny')
         if model_variant not in MODEL_VARIANTS:
@@ -153,6 +193,18 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                                         num_baseline_points=self.baseline_num_points,
                                         direct_point_regression=self.direct_point_regression,
                                         anchor_embedding=config.get('anchor_embedding', True),
+                                        line_refiner=config.get('line_refiner', False),
+                                        image_size=(image_size[1], image_size[0]),
+                                        curve_prompt_noise_prob=config.get('curve_prompt_noise_prob', 0.0),
+                                        curve_prompt_noise_normal_px=config.get('curve_prompt_noise_normal_px', 0.0),
+                                        curve_prompt_noise_tangent_px=config.get('curve_prompt_noise_tangent_px', 0.0),
+                                        curve_prompt_noise_curvature_px=config.get('curve_prompt_noise_curvature_px',
+                                                                                   0.0),
+                                        pre_refiner_noise_prob=config.get('pre_refiner_noise_prob', 0.0),
+                                        pre_refiner_noise_normal_px=config.get('pre_refiner_noise_normal_px', 0.0),
+                                        pre_refiner_noise_tangent_px=config.get('pre_refiner_noise_tangent_px', 0.0),
+                                        pre_refiner_noise_curvature_px=config.get('pre_refiner_noise_curvature_px',
+                                                                                  0.0),
                                         anchors=anchors)
 
         self.nn = nn.ModuleDict({'encoder': encoder_model,
@@ -222,6 +274,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                 *,
                 encoder_input: Optional[torch.Tensor] = None,
                 encoder_hidden_states: Optional[torch.Tensor] = None,
+                refiner_encoder_hidden_states: Optional[torch.Tensor] = None,
                 encoder_curves: Optional[torch.Tensor] = None,
                 target_anchor_idx: Optional[torch.Tensor] = None,
                 encoder_mask: Optional[torch.Tensor] = None,
@@ -233,6 +286,8 @@ class OrliModel(nn.Module, SegmentationBaseModel):
             encoder_input: Optional input for the encoder.
             encoder_hidden_states: Optional encoder embeddings with curve
                                    embeddings already added.
+            refiner_encoder_hidden_states: Optional encoder embeddings used
+                                           only by the local curve refiner.
             encoder_curves: Optional curves to be embedded and added to encoder
                             embeddings.
             target_anchor_idx: Optional per-token anchor assignments used during
@@ -270,12 +325,18 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         if encoder_input is not None:
             encoder_hidden_states = self.forward_encoder_embeddings(encoder_input)
 
+        refiner_memory = (refiner_encoder_hidden_states
+                          if refiner_encoder_hidden_states is not None
+                          else encoder_hidden_states)
         output = self.nn['decoder'](tokens=tokens,
                                     mask=mask,
                                     encoder_input=encoder_hidden_states,
                                     encoder_mask=encoder_mask,
                                     input_pos=input_pos)
-        return self.nn['regressor'](output, target_anchor_idx=target_anchor_idx)
+        return self.nn['regressor'](output,
+                                    target_anchor_idx=target_anchor_idx,
+                                    encoder_hidden_states=refiner_memory,
+                                    encoder_sizes=self.nn['adapter'].output_sizes)
 
     def forward_encoder_embeddings(self, encoder_input):
         """
@@ -453,6 +514,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
             input_tok = F.one_hot(tokens.squeeze(-1), num_classes=4).to(device=encoder_hidden_states.device)
             logits = self.forward(tokens=torch.cat([input_tok.unsqueeze(1),
                                                     curves.unsqueeze(1)], dim=-1),
+                                  refiner_encoder_hidden_states=encoder_hidden_states,
                                   mask=curr_masks,
                                   input_pos=curr_input_pos)
 
@@ -472,4 +534,5 @@ class OrliModel(nn.Module, SegmentationBaseModel):
 
         eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
         eos_curve_mask = eos_token_mask.expand(self.baseline_dim, -1, -1).permute(1, 2, 0)
+        self._last_eos_reached = eos_token_reached.detach().clone()
         return torch.stack(generated_curves, dim=1) * eos_curve_mask

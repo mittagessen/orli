@@ -32,7 +32,9 @@ from orli.modules import (MultiHeadAttention, RMSNorm, TanhGate,
                           PositionEmbeddingRandom)
 from orli.modules.transformer import _get_clones
 from orli.modules.baseline import (DEFAULT_NUM_BASELINE_POINTS,
+                                   add_curve_noise,
                                    baseline_param_dim,
+                                   curve_vector_to_polyline,
                                    prepare_baseline_anchors)
 
 logger = logging.getLogger(__name__)
@@ -97,7 +99,7 @@ def baseline_decoder(vocab_size: int = 4 + baseline_param_dim(DEFAULT_NUM_BASELI
                      norm_eps: int = 1e-5,
                      rope_base: int = 10000,
                      encoder_sizes: list[tuple[int, int]] = None,  # start of fusion parameters
-                     curve_num_freqs: int = 4,
+                     curve_num_freqs: int = 0,
                      pretrained: Optional[str] = None,
                      **kwargs) -> TransformerDecoder:
     """
@@ -648,6 +650,9 @@ def inverse_sigmoid(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     """
     Inverse sigmoid (logit) function with clamping for numerical stability.
     """
+    # bf16/fp16 round (1 - 1e-5) back to 1.0, so the upper clamp would no-op
+    # and we'd hit log(1/0) = inf. Widen eps to be at least the dtype's eps.
+    eps = max(eps, torch.finfo(x.dtype).eps)
     x = x.clamp(min=eps, max=1 - eps)
     return torch.log(x / (1 - x))
 
@@ -660,8 +665,9 @@ class CurveRegressionHead(nn.Module):
     space and combined with the previous iteration's baseline vector via inverse
     sigmoid, addition, and sigmoid. This ensures outputs stay in [0,1] and
     provides better gradient flow near boundaries. Each refinement step
-    conditions its offset prediction on the decoder state, the selected anchor
-    identity, and the current baseline state.
+    conditions its offset prediction on the decoder state, the anchor-derived
+    initialization, the current baseline state, and optionally local encoder
+    samples around the predicted line.
     """
 
     def __init__(self,
@@ -671,7 +677,18 @@ class CurveRegressionHead(nn.Module):
                  num_iterations: int = 4,
                  num_baseline_points: int = DEFAULT_NUM_BASELINE_POINTS,
                  direct_point_regression: bool = False,
-                 anchor_embedding: bool = True):
+                 anchor_embedding: bool = True,
+                 line_refiner: bool = False,
+                 image_size: Optional[tuple[int, int]] = None,
+                 curve_prompt_noise_prob: float = 0.0,
+                 curve_prompt_noise_normal_px: float = 0.0,
+                 curve_prompt_noise_tangent_px: float = 0.0,
+                 curve_prompt_noise_curvature_px: float = 0.0,
+                 pre_refiner_noise_prob: float = 0.0,
+                 pre_refiner_noise_normal_px: float = 0.0,
+                 pre_refiner_noise_tangent_px: float = 0.0,
+                 pre_refiner_noise_curvature_px: float = 0.0,
+                 line_refiner_heads: int = 8):
         super().__init__()
         if isinstance(anchors, torch.Tensor):
             anchors_t = anchors.float()
@@ -684,6 +701,16 @@ class CurveRegressionHead(nn.Module):
         self.num_baseline_points = int(num_baseline_points)
         self.direct_point_regression = bool(direct_point_regression)
         self.use_anchor_embedding = bool(anchor_embedding)
+        self.use_line_refiner = bool(line_refiner)
+        self.image_size = image_size
+        self.curve_prompt_noise_prob = float(curve_prompt_noise_prob)
+        self.curve_prompt_noise_normal_px = float(curve_prompt_noise_normal_px)
+        self.curve_prompt_noise_tangent_px = float(curve_prompt_noise_tangent_px)
+        self.curve_prompt_noise_curvature_px = float(curve_prompt_noise_curvature_px)
+        self.pre_refiner_noise_prob = float(pre_refiner_noise_prob)
+        self.pre_refiner_noise_normal_px = float(pre_refiner_noise_normal_px)
+        self.pre_refiner_noise_tangent_px = float(pre_refiner_noise_tangent_px)
+        self.pre_refiner_noise_curvature_px = float(pre_refiner_noise_curvature_px)
         self.curve_dim = anchors_t.shape[-1]
         num_cls = 4
         reg_hidden_dim = scale_hidden_dim_for_mlp(embed_dim)
@@ -719,15 +746,122 @@ class CurveRegressionHead(nn.Module):
         self.reg_projs = _get_clones(reg_proj, num_iterations)
         self.cls_projs = _get_clones(cls_proj, num_iterations)
 
+        if self.use_line_refiner:
+            if embed_dim % line_refiner_heads != 0:
+                raise ValueError(f'embed_dim ({embed_dim}) must be divisible by line_refiner_heads '
+                                 f'({line_refiner_heads}).')
+            self.local_point_embeddings = nn.Parameter(torch.zeros(self.num_baseline_points, embed_dim))
+            nn.init.normal_(self.local_point_embeddings, std=0.02)
+            self.local_query_norm = RMSNorm(embed_dim)
+            self.local_sample_norm = RMSNorm(embed_dim)
+            self.local_attention = nn.MultiheadAttention(embed_dim,
+                                                         line_refiner_heads,
+                                                         batch_first=True)
+            self.local_input_proj = nn.Linear(embed_dim * 3, embed_dim)
+            self.local_refiner = nn.Sequential(nn.Linear(embed_dim, reg_hidden_dim),
+                                               nn.SiLU(),
+                                               nn.Linear(reg_hidden_dim, self.curve_dim))
+            nn.init.zeros_(self.local_refiner[-1].weight)
+            nn.init.zeros_(self.local_refiner[-1].bias)
+        else:
+            self.local_point_embeddings = None
+            self.local_query_norm = None
+            self.local_sample_norm = None
+            self.local_attention = None
+            self.local_input_proj = None
+            self.local_refiner = None
+
+    def _sample_local_encoder_tokens(self,
+                                     encoder_hidden_states: torch.Tensor,
+                                     encoder_sizes: list[tuple[int, int]],
+                                     curves: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, _ = curves.shape
+        points = curve_vector_to_polyline(curves.detach(),
+                                          direct_point_regression=self.direct_point_regression,
+                                          num_points=self.num_baseline_points).clamp(0.0, 1.0)
+        num_points = points.shape[-2]
+        grid = points.reshape(batch_size, seq_len * num_points, 1, 2)
+        grid = grid.mul(2.0).sub(1.0)
+
+        local_tokens: list[torch.Tensor] = []
+        offset = 0
+        for height, width in encoder_sizes:
+            level_len = height * width
+            level = encoder_hidden_states[:, offset:offset + level_len, :]
+            if level.shape[1] != level_len:
+                raise ValueError('encoder_hidden_states is shorter than encoder_sizes describe.')
+            offset += level_len
+
+            channels = level.shape[-1]
+            level_map = level.transpose(1, 2).reshape(batch_size, channels, height, width)
+            sample_map = level_map.float()
+            sample_grid = grid.float()
+            sampled = F.grid_sample(sample_map,
+                                    sample_grid,
+                                    mode='bilinear',
+                                    padding_mode='border',
+                                    align_corners=True)
+            sampled = sampled.to(dtype=encoder_hidden_states.dtype)
+            sampled = sampled.squeeze(-1).transpose(1, 2)
+            sampled = sampled.reshape(batch_size, seq_len, num_points, channels)
+            point_pos = self.local_point_embeddings[:num_points].to(dtype=sampled.dtype,
+                                                                    device=sampled.device)
+            sampled = sampled + point_pos.view(1, 1, num_points, channels)
+            local_tokens.append(sampled)
+
+        if not local_tokens:
+            raise ValueError('line refiner requires at least one encoder feature level.')
+        return torch.cat(local_tokens, dim=2)
+
+    def _refine_from_local_features(self,
+                                    decoder_state: torch.Tensor,
+                                    curves: torch.Tensor,
+                                    encoder_hidden_states: Optional[torch.Tensor],
+                                    encoder_sizes: Optional[list[tuple[int, int]]]) -> torch.Tensor:
+        if encoder_hidden_states is None or encoder_sizes is None:
+            return curves
+
+        batch_size, seq_len, embed_dim = decoder_state.shape
+        refiner_curves = curves
+        if (self.training and
+                self.image_size is not None and
+                self.pre_refiner_noise_prob > 0.0):
+            refiner_curves = add_curve_noise(curves,
+                                             self.image_size,
+                                             direct_point_regression=self.direct_point_regression,
+                                             num_points=self.num_baseline_points,
+                                             prob=self.pre_refiner_noise_prob,
+                                             normal_px=self.pre_refiner_noise_normal_px,
+                                             tangent_px=self.pre_refiner_noise_tangent_px,
+                                             curvature_px=self.pre_refiner_noise_curvature_px)
+        local_tokens = self._sample_local_encoder_tokens(encoder_hidden_states,
+                                                         encoder_sizes,
+                                                         refiner_curves)
+        local_tokens = self.local_sample_norm(local_tokens)
+        query = self.local_query_norm(decoder_state).reshape(batch_size * seq_len, 1, embed_dim)
+        kv = local_tokens.reshape(batch_size * seq_len, local_tokens.shape[-2], embed_dim)
+        local_context, _ = self.local_attention(query, kv, kv, need_weights=False)
+        local_context = local_context.reshape(batch_size, seq_len, embed_dim)
+
+        curve_state = self.curve_state_proj(inverse_sigmoid(refiner_curves))
+        refiner_input = self.local_input_proj(torch.cat([decoder_state,
+                                                         local_context,
+                                                         curve_state],
+                                                        dim=-1))
+        offsets = self.local_refiner(refiner_input)
+        return torch.sigmoid(inverse_sigmoid(refiner_curves) + offsets)
+
     def forward(self,
                 xs: list[torch.Tensor],
-                target_anchor_idx: Optional[torch.Tensor] = None) -> dict[str, torch.Tensor]:
+                target_anchor_idx: Optional[torch.Tensor] = None,
+                encoder_hidden_states: Optional[torch.Tensor] = None,
+                encoder_sizes: Optional[list[tuple[int, int]]] = None) -> dict[str, torch.Tensor]:
         """
         Args:
             xs: A list containing `num_iterations` tensors of shape
                 ``[b, s, d_e]`` where ``d_e`` is the decoder embedding dim.
             target_anchor_idx: Optional tensor of shape ``[b, s]`` with
-                per-token anchor ids used for training-time anchor
+                per-token anchor ids used for training-time hard-anchor
                 initialization.
 
         Returns:
@@ -741,11 +875,13 @@ class CurveRegressionHead(nn.Module):
         # per-token initialization anchor without overloading the token logits.
         h0 = self.norms[0](xs[0])
         anchor_logits = self.anchor_proj(h0)  # [b, s, N]
+        anchors = self.curve_anchors.to(dtype=anchor_logits.dtype, device=anchor_logits.device)
         if target_anchor_idx is not None:
             anchor_idx = target_anchor_idx.clamp(min=0, max=self.num_anchors - 1)
+            init_curves = anchors[anchor_idx]
         else:
             anchor_idx = anchor_logits.argmax(-1)  # [b, s]
-        init_curves = self.curve_anchors[anchor_idx]  # [b, s, curve_dim]
+            init_curves = anchors[anchor_idx]  # [b, s, curve_dim]
         if self.use_anchor_embedding:
             anchor_cond = self.anchor_embeddings(anchor_idx)
         else:
@@ -768,6 +904,13 @@ class CurveRegressionHead(nn.Module):
             offsets = reg_proj(reg_input_proj(reg_input))
             _curves.append(torch.sigmoid(inverse_sigmoid(curves) + offsets))
             _logits.append(cls_proj(layer))
+
+        if self.use_line_refiner:
+            refined_curves = self._refine_from_local_features(self.norms[-1](xs[-1]),
+                                                              _curves[-1],
+                                                              encoder_hidden_states,
+                                                              encoder_sizes)
+            _curves.append(refined_curves)
 
         return {'curves': torch.stack(_curves[1:]),
                 'tokens': torch.stack(_logits),
