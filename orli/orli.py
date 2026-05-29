@@ -43,6 +43,81 @@ logger = logging.getLogger(__name__)
 __all__ = ['OrliModel']
 
 
+# ---------------------------------------------------------------------------
+# RegNetX-8GF encoder wrapper
+# ---------------------------------------------------------------------------
+
+# Empirically verified output channel widths for torchvision RegNetX-8GF.
+# Indices 0..3 correspond to backbone stages C2..C5 at strides 4, 8, 16, 32.
+_REGNETX_8GF_CHANNELS   = (80, 240, 720, 1920)
+_REGNETX_8GF_REDUCTIONS = (4,    8,  16,   32)
+
+
+class _RegNetXFeatureInfo:
+    """
+    Mimics the timm ``feature_info`` interface so that ``OrliModel.__init__``
+    can compute ``encoder_sizes`` without any changes to its own logic.
+
+    Index mapping:
+      0 → C2  (stride  4, 80 ch)
+      1 → C3  (stride  8, 240 ch)
+      2 → C4  (stride 16, 720 ch)
+      3 → C5  (stride 32, 1920 ch)
+    """
+
+    def channels(self, idx: int) -> int:
+        return _REGNETX_8GF_CHANNELS[idx]
+
+    def reduction(self, idx: int) -> int:
+        return _REGNETX_8GF_REDUCTIONS[idx]
+
+
+class _RegNetX8GFEncoder(nn.Module):
+    """
+    torchvision RegNetX-8GF wrapped to match the timm ``features_only``
+    interface that ``OrliModel`` expects.
+
+    - ``forward(x)`` returns a **list** of feature tensors selected by
+      ``out_indices`` (same contract as a timm ``features_only`` model).
+    - ``feature_info`` exposes ``.channels(idx)`` and ``.reduction(idx)``
+      with the same index convention as the timm counterpart.
+
+    Pretrained weights are ``RegNet_X_8GF_Weights.IMAGENET1K_V2`` (82.7 %
+    top-1 on ImageNet), identical to what ``regnetx_seg`` uses.
+    """
+
+    def __init__(self, pretrained: bool = True, out_indices: list[int] = None):
+        super().__init__()
+        from torchvision.models import regnet_x_8gf, RegNet_X_8GF_Weights
+        weights = RegNet_X_8GF_Weights.IMAGENET1K_V2 if pretrained else None
+        net = regnet_x_8gf(weights=weights)
+        # Store stem separately; block1 consumes stem output.
+        self._stem   = net.stem
+        self._block1 = net.trunk_output.block1   # → C2  stride 4   80 ch
+        self._block2 = net.trunk_output.block2   # → C3  stride 8  240 ch
+        self._block3 = net.trunk_output.block3   # → C4  stride 16 720 ch
+        self._block4 = net.trunk_output.block4   # → C5  stride 32 1920 ch
+        self.out_indices = out_indices if out_indices is not None else [1, 2, 3]
+        self.feature_info = _RegNetXFeatureInfo()
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        x = self._stem(x)
+        feats = [
+            self._block1(x),           # idx 0 → C2
+            None,                      # placeholder, filled below
+            None,
+            None,
+        ]
+        feats[1] = self._block2(feats[0])  # idx 1 → C3
+        feats[2] = self._block3(feats[1])  # idx 2 → C4
+        feats[3] = self._block4(feats[2])  # idx 3 → C5
+        return [feats[i] for i in self.out_indices]
+
+
+# ---------------------------------------------------------------------------
+# OrliModel
+# ---------------------------------------------------------------------------
+
 class OrliModel(nn.Module, SegmentationBaseModel):
     """
     The transformer segmentation fusion model.
@@ -122,10 +197,17 @@ class OrliModel(nn.Module, SegmentationBaseModel):
 
         logger.info('Creating segmentation model')
 
-        encoder_model = timm.create_model(encoder_name,
-                                          pretrained=True,
-                                          features_only=True,
-                                          out_indices=encoder_idxs)
+        # ------------------------------------------------------------------
+        # Encoder — timm for ConvNeXtV2 variants, torchvision for RegNetX-8GF
+        # ------------------------------------------------------------------
+        if encoder_name == 'regnetx_8gf':
+            encoder_model = _RegNetX8GFEncoder(pretrained=True,
+                                               out_indices=encoder_idxs)
+        else:
+            encoder_model = timm.create_model(encoder_name,
+                                              pretrained=True,
+                                              features_only=True,
+                                              out_indices=encoder_idxs)
 
         encoder_sizes = [(int(image_size[0]/encoder_model.feature_info.reduction(idx)),
                           int(image_size[1]/encoder_model.feature_info.reduction(idx)),

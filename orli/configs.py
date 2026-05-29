@@ -51,6 +51,42 @@ MODEL_VARIANTS = {
         'neck_dropout': 0.1,
         'neck_fusion_depth': 3,
     },
+    # ------------------------------------------------------------------
+    # RegNetX-8GF variant
+    # ------------------------------------------------------------------
+    # Uses torchvision RegNetX-8GF (IMAGENET1K_V2, 82.7 % top-1) instead
+    # of a timm ConvNeXtV2.  Channel widths at the selected stages are:
+    #   C3 (stride  8):  240 ch
+    #   C4 (stride 16):  720 ch
+    #   C5 (stride 32): 1920 ch
+    # The OrliHybridNeck's input_proj (1×1 Conv2d per scale) absorbs the
+    # different channel widths transparently — spatial sizes are identical
+    # to the 'tiny' variant at any given image_size.
+    #
+    # Neck topology mirrors 'tiny' exactly (same hidden_dim, num_heads,
+    # output_ds_factors) so decoder memory tokens have the same shape and
+    # the decoder/regressor are fully interchangeable between variants.
+    #
+    # LR note: configure_optimizers applies encoder_lr = lrate * 0.1.
+    # RegNetX-8GF has supervised ImageNet weights (not FCMAE) so you may
+    # want to increase the encoder LR fraction to ~0.2–0.3 for faster
+    # backbone adaptation on manuscript data.  This is a config-level
+    # tuning decision, not a code change.
+    'regnetx': {
+        'encoder_name': 'regnetx_8gf',          # sentinel — not a timm name;
+                                                 # OrliModel detects this and builds
+                                                 # _RegNetX8GFEncoder instead.
+        'encoder_idxs': (1, 2, 3),              # → C3, C4, C5
+        'neck_num_layers': 1,
+        'neck_num_heads': 8,
+        'neck_hidden_dim': 256,
+        'neck_use_encoder_idx': (2,),
+        'neck_output_ds_factors': (1, 2, 2),
+        'neck_norm': 'group',
+        'neck_ffn_dim': 1024,
+        'neck_dropout': 0.0,
+        'neck_fusion_depth': 2,
+    },
 }
 
 _DEFAULT_MODEL_VARIANT = 'tiny'
