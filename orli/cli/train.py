@@ -127,8 +127,7 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               help='Number of fixed arc-length baseline points used for curve regression.')
 @click.option('--model-variant',
               type=click.Choice(['pico', 'tiny', 'small', 'regnetx']),
-              help='Model size preset to train. Use `regnetx` for the RegNetX-8GF backbone '
-                   '(torchvision IMAGENET1K_V2 weights, same neck/decoder as `tiny`).')
+              help='Model size preset to train. Use `regnetx` for the RegNetX-8GF backbone ')
 @click.option('--curve-fourier-features/--no-curve-fourier-features',
               default=None,
               help='Enable Fourier features for previous curve inputs.')
