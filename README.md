@@ -4,13 +4,25 @@ Orli (**o**rdered **r**egression of **li**nes) is a layout analysis method
 performing the text line detection and reading order determination subtasks
 jointly.
 
-Orli consists of a ConvNeXtV2 vision encoder, an adapter module projecting
+Orli consists of a ConvNeXtV2 vision encoder (or optionally a RegNetX-8GF
+encoder via the `regnetx` model variant), an adapter module projecting
 multi-scale feature maps into a shared embedding space, and a transformer
 decoder with cross-attention. The autoregressive decoder predicts baselines by
 regressing local-frame baseline vectors through iterative refinement. Training
 targets are fixed-size, arc-length-resampled baseline polylines; the regressed
 vector stores the baseline center, length, orientation, and normal offsets for
 the sampled points.
+
+## Model Variants
+
+| Variant | Encoder | Params | Notes |
+|---|---|---|---|
+| `pico` | ConvNeXtV2-pico | ~28 M | Fastest, 2-level neck |
+| `tiny` | ConvNeXtV2-tiny | ~28 M | Default |
+| `small` | ConvNeXtV2-small | ~50 M | Higher capacity |
+| `regnetx` | RegNetX-8GF | ~39 M | torchvision ImageNet1K_V2 weights; same neck topology as `tiny` |
+
+Select a variant with `--model-variant` or set `model_variant:` in the experiment YAML.
 
 ## Installation
 
