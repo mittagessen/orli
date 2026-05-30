@@ -20,7 +20,7 @@ the sampled points.
 | `pico` | ConvNeXtV2-pico | ~28 M | Fastest, 2-level neck |
 | `tiny` | ConvNeXtV2-tiny | ~28 M | Default |
 | `small` | ConvNeXtV2-small | ~50 M | Higher capacity |
-| `regnetx` | RegNetX-8GF | ~39 M | torchvision ImageNet1K_V2 weights; same neck topology as `tiny` |
+| `regnetx` | RegNetX-8GF | ~39 M | timm `regnetx_080.tv2_in1k` weights; same neck topology as `tiny` |
 
 Select a variant with `--model-variant` or set `model_variant:` in the experiment YAML.
 
