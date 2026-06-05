@@ -29,7 +29,9 @@ logger = logging.getLogger('orli')
 
 @click.command('compile')
 @click.pass_context
-@click.option('-o', '--output', type=click.Path(), default='dataset.arrow',
+@click.option('-o', '--output', 
+              type=click.Path(dir_okay=False, writable=True), 
+              default='dataset.arrow',
               help='Output dataset file')
 @click.option('-F', '--files', default=None, multiple=True,
               callback=_validate_manifests, type=click.File(mode='r', lazy=True),
