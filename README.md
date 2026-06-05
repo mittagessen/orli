@@ -107,9 +107,9 @@ num_workers: 12
 num_threads: 1
 train:
   training_data:
-    - train.arrow
+    - train.lst
   evaluation_data:
-    - val.arrow
+    - val.lst
   checkpoint_path: experiments/orli_finetuned
   image_size: [1920, 1440]
   optimizer: AdamW
