@@ -22,13 +22,15 @@ import torch.nn.functional as F
 
 from torch import nn
 from lightning.fabric import Fabric
-from typing import Optional, Any, Union
+from typing import Optional, Union
 from collections.abc import Generator
 
 from orli.configs import OrliSegmentationInferenceConfig, MODEL_VARIANTS
 from orli.fusion import baseline_decoder, OrliHybridNeck, CurveRegressionHead
 from orli.dataset import get_default_transforms
-from orli.modules.bezier import sample_bezier_curve
+from orli.modules.baseline import (DEFAULT_NUM_BASELINE_POINTS,
+                                   curve_vector_dim,
+                                   curve_vector_to_polyline)
 
 from kraken.models import SegmentationBaseModel
 from kraken.containers import Segmentation, BaselineLine
@@ -55,26 +57,32 @@ class OrliModel(nn.Module, SegmentationBaseModel):
     def __init__(self, **kwargs):
         super().__init__()
 
-        if (config := kwargs.get('config', None)) is None:
-            raise ValueError('config argument is missing in args.')
-        if hasattr(config, '__dict__'):
-            config = {'anchors': config.anchors,
-                      'model_variant': config.model_variant}
-        config = dict(config)
+        if (legacy_config := kwargs.pop('config', None)) is not None:
+            if hasattr(legacy_config, '__dict__'):
+                legacy_config = vars(legacy_config)
+            for key in ('anchors', 'model_variant', 'baseline_num_points'):
+                if key in legacy_config and key not in kwargs:
+                    kwargs[key] = legacy_config[key]
 
-        model_variant = config.get('model_variant', 'tiny')
+        if (model_variant := kwargs.get('model_variant', None)) is None:
+            raise ValueError('model_variant argument is missing in args.')
+        if (anchors := kwargs.get('anchors', None)) is None:
+            raise ValueError('anchors argument is missing in args.')
         if model_variant not in MODEL_VARIANTS:
             choices = ', '.join(MODEL_VARIANTS)
             raise ValueError(f'Unknown model_variant {model_variant!r}. Choices: {choices}')
-        metadata = dict(kwargs)
-        metadata['config'] = config
-        kwargs = {**kwargs, **config, **MODEL_VARIANTS[model_variant]}
 
         if (image_size := kwargs.get('image_size', None)) is None:
             raise ValueError('image_size argument is missing in args.')
 
-        if (anchors := config.get('anchors', None)) is None:
-            raise ValueError('anchors argument is missing in config.')
+        self.baseline_num_points = int(kwargs.get('baseline_num_points',
+                                                  DEFAULT_NUM_BASELINE_POINTS) or DEFAULT_NUM_BASELINE_POINTS)
+        kwargs['baseline_num_points'] = self.baseline_num_points
+        self.baseline_dim = curve_vector_dim(self.baseline_num_points)
+        self.user_metadata.update({'accuracy': [], 'metrics': []})
+        self.user_metadata.update(kwargs)
+
+        kwargs = {**kwargs, **MODEL_VARIANTS[model_variant]}
 
         encoder_name = kwargs['encoder_name']
         encoder_idxs = list(kwargs['encoder_idxs'])
@@ -87,11 +95,6 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         neck_ffn_dim = kwargs['neck_ffn_dim']
         neck_dropout = kwargs['neck_dropout']
         neck_fusion_depth = kwargs['neck_fusion_depth']
-
-        self.user_metadata: dict[str, Any] = {'model_type': self.model_type,
-                                               'accuracy': [],
-                                               'metrics': []}
-        self.user_metadata.update(metadata)
 
         logger.info('Creating segmentation model')
 
@@ -117,10 +120,12 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                                  dropout=neck_dropout,
                                  fusion_depth=neck_fusion_depth)
 
-        decoder_model = baseline_decoder(encoder_sizes=adapter.output_sizes)
+        decoder_model = baseline_decoder(vocab_size=4 + self.baseline_dim,
+                                         encoder_sizes=adapter.output_sizes)
 
         curve_reg = CurveRegressionHead(embed_dim=decoder_model.tok_embeddings.embed_dim,
                                         num_iterations=len(decoder_model.output_hidden_states) + 1,
+                                        num_baseline_points=self.baseline_num_points,
                                         anchors=anchors)
 
         self.nn = nn.ModuleDict({'encoder': encoder_model,
@@ -129,14 +134,6 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                                  'regressor': curve_reg})
 
         self.ready_for_generation = False
-
-    @property
-    def user_metadata(self) -> dict[str, Any]:
-        return self._user_metadata
-
-    @user_metadata.setter
-    def user_metadata(self, val: dict[str, Any]) -> None:
-        self._user_metadata = val
 
     def setup_caches(self,
                      batch_size: int,
@@ -190,6 +187,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                 *,
                 encoder_input: Optional[torch.Tensor] = None,
                 encoder_hidden_states: Optional[torch.Tensor] = None,
+                refiner_encoder_hidden_states: Optional[torch.Tensor] = None,
                 encoder_curves: Optional[torch.Tensor] = None,
                 target_anchor_idx: Optional[torch.Tensor] = None,
                 encoder_mask: Optional[torch.Tensor] = None,
@@ -201,6 +199,8 @@ class OrliModel(nn.Module, SegmentationBaseModel):
             encoder_input: Optional input for the encoder.
             encoder_hidden_states: Optional encoder embeddings with curve
                                    embeddings already added.
+            refiner_encoder_hidden_states: Optional encoder embeddings used
+                                           only by the local curve refiner.
             encoder_curves: Optional curves to be embedded and added to encoder
                             embeddings.
             target_anchor_idx: Optional per-token anchor assignments used during
@@ -232,18 +232,21 @@ class OrliModel(nn.Module, SegmentationBaseModel):
             - d_e: encoder embed dim
             - m_s: max seq len
         """
-        # During decoding, encoder_input will only be provided
-        # for new inputs. Previous encoder outputs are cached
-        # in the decoder cache.
         if encoder_input is not None:
             encoder_hidden_states = self.forward_encoder_embeddings(encoder_input)
 
+        refiner_memory = (refiner_encoder_hidden_states
+                          if refiner_encoder_hidden_states is not None
+                          else encoder_hidden_states)
         output = self.nn['decoder'](tokens=tokens,
                                     mask=mask,
                                     encoder_input=encoder_hidden_states,
                                     encoder_mask=encoder_mask,
                                     input_pos=input_pos)
-        return self.nn['regressor'](output, target_anchor_idx=target_anchor_idx)
+        return self.nn['regressor'](output,
+                                    target_anchor_idx=target_anchor_idx,
+                                    encoder_hidden_states=refiner_memory,
+                                    encoder_sizes=self.nn['adapter'].output_sizes)
 
     def forward_encoder_embeddings(self, encoder_input):
         """
@@ -284,7 +287,6 @@ class OrliModel(nn.Module, SegmentationBaseModel):
 
         self._resize_generation_state(config.batch_size)
 
-        # generate a regular causal mask
         self._masks = self._fabric.to_device(torch.tril(torch.ones(max_predicted_lines,
                                                                    max_predicted_lines,
                                                                    dtype=torch.bool).unsqueeze(0)))
@@ -302,7 +304,7 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                           decoder_max_seq_len=max_predicted_lines,
                           dtype=self.m_dtype)
 
-        bos = torch.zeros(12, dtype=self.m_dtype)
+        bos = torch.zeros(4 + self.baseline_dim, dtype=self.m_dtype)
         bos[self.bos_id] = 1.0
         self._prompt = self._fabric.to_device(bos.unsqueeze(0).unsqueeze(0).repeat(self._batch_size, 1, 1))
 
@@ -321,11 +323,14 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         non_empty = curves.abs().sum(dim=-1) > 0
         curves = curves[non_empty]
 
-        if curves.numel():
-            curve_scale = torch.tensor((im.width, im.height) * 4, dtype=curves.dtype, device=curves.device)
-            curves = curves * curve_scale
-
-        sampled = sample_bezier_curve(curves).cpu()
+        sampled = curve_vector_to_polyline(curves,
+                                           num_points=self.baseline_num_points).clamp(0.0, 1.0)
+        if sampled.numel():
+            scale = torch.tensor((im.width, im.height),
+                                 dtype=sampled.dtype,
+                                 device=sampled.device)
+            sampled = sampled * scale
+        sampled = sampled.cpu()
 
         lines = []
         baselines = []
@@ -354,18 +359,17 @@ class OrliModel(nn.Module, SegmentationBaseModel):
     @torch.inference_mode()
     def predict_curves(self, encoder_input: torch.FloatTensor) -> Generator[torch.Tensor, None, None]:
         """
-        Predicts Bézier curves and line classes.
+        Predicts local-frame baseline vectors and line classes.
 
         Args:
             encoder_input: Image input for the encoder with shape ``n x c x h x w``
 
         Returns:
-            A float tensor of with shape ``n x s x 8`` where ``n`` is the batch
-            size, ``s`` is the maximum number of curves detected, and the last
-            dimension is an 8-tuple defining the control points of a cubic
-            Bézier curve. No-output is indicated by zeroed output control
-            points. If s < max_generated_tokens the last entry across all batch
-            items will be a no-output.
+            A float tensor of with shape ``n x s x d`` where ``n`` is the batch
+            size, ``s`` is the maximum number of baselines detected, and ``d``
+            is the local-frame baseline vector width. No-output is indicated by
+            zeroed output vectors. If s < max_generated_tokens the last entry
+            across all batch items will be a no-output.
         """
         logger.info('Computing encoder embeddings')
 
@@ -379,13 +383,11 @@ class OrliModel(nn.Module, SegmentationBaseModel):
 
         eos_token = torch.tensor(self.eos_id, device=encoder_hidden_states.device, dtype=torch.long)
 
-        # Mask is shape (batch_size, max_seq_len, image_embedding_len)
         encoder_mask = torch.ones((encoder_hidden_states.size(0),
                                    1,
                                    encoder_hidden_states.size(1)),
                                   dtype=torch.bool,
                                   device=encoder_input.device)
-        # prefill step
         curr_masks = self._masks[:, :1]
         logits = self.forward(tokens=self._prompt,
                               encoder_hidden_states=encoder_hidden_states,
@@ -400,24 +402,21 @@ class OrliModel(nn.Module, SegmentationBaseModel):
 
         curr_pos = 1
 
-        # keeps track of EOS tokens emitted by each sequence in a batch
         eos_token_reached = torch.zeros(self._batch_size, dtype=torch.bool, device=encoder_input.device)
         eos_token_reached |= tokens[:, -1] == eos_token
 
-        # mask used for setting all values from EOS token to pad_id in output sequences.
         eos_token_mask = torch.ones(self._batch_size, 0, dtype=torch.int32, device=curves.device)
 
         for _ in range(getattr(self._inf_config, 'max_predicted_lines', 768) - 1):
-            # update eos_token_mask if an EOS token was emitted in a previous step
             eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
 
             curr_input_pos = self._input_pos[:, curr_pos]
             curr_masks = self._masks[:, curr_pos, None, :]
 
-            # no need for encoder embeddings anymore as they're in the cache now
             input_tok = F.one_hot(tokens.squeeze(-1), num_classes=4).to(device=encoder_hidden_states.device)
             logits = self.forward(tokens=torch.cat([input_tok.unsqueeze(1),
                                                     curves.unsqueeze(1)], dim=-1),
+                                  refiner_encoder_hidden_states=encoder_hidden_states,
                                   mask=curr_masks,
                                   input_pos=curr_input_pos)
 
@@ -436,5 +435,6 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                 break
 
         eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
-        eos_curve_mask = eos_token_mask.expand(8, -1, -1).permute(1, 2, 0)
+        eos_curve_mask = eos_token_mask.expand(self.baseline_dim, -1, -1).permute(1, 2, 0)
+        self._last_eos_reached = eos_token_reached.detach().clone()
         return torch.stack(generated_curves, dim=1) * eos_curve_mask

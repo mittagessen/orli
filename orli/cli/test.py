@@ -39,6 +39,9 @@ import click
               type=float,
               show_default=True,
               help='Minimum match score for ordering evaluation')
+@click.option('--baseline-num-points',
+              type=click.IntRange(4),
+              help='Number of fixed arc-length baseline points in evaluation targets')
 @click.option('--compile/--no-compile',
               help='Switch to enable/disable torch.compile() on model',
               default=True,
@@ -88,10 +91,8 @@ def test(ctx, **kwargs):
     accelerator = ctx.meta['accelerator']
     devices = ctx.meta['devices']
 
-    dm_config = OrliSegmentationTrainingDataConfig(test_data=list(test_data),
-                                                   **params)
-
-    data_module = OrliSegmentationDataModule(dm_config)
+    params['accelerator'] = accelerator
+    params['device'] = devices
 
     load = str(load)
     if load.endswith('.ckpt'):
@@ -99,6 +100,27 @@ def test(ctx, **kwargs):
                                                            weights_only=False)
     else:
         model = OrliSegmentationModel.load_from_weights(load)
+
+    model_config = getattr(model.hparams, 'config', None)
+    model_points = getattr(model_config, 'baseline_num_points', None)
+    if model_points is None and model.net is not None:
+        model_points = getattr(model.net, 'baseline_num_points', None)
+    if model_points is not None:
+        params['baseline_num_points'] = model_points
+
+    # Match the trained image size to keep encoder and KV-cache shapes aligned.
+    model_image_size = None
+    if model.net is not None:
+        model_image_size = model.net.user_metadata.get('image_size')
+    if model_image_size is None:
+        model_image_size = getattr(model_config, 'image_size', None)
+    if model_image_size is not None:
+        params['image_size'] = tuple(model_image_size)
+
+    dm_config = OrliSegmentationTrainingDataConfig(test_data=list(test_data),
+                                                   **params)
+
+    data_module = OrliSegmentationDataModule(dm_config)
 
     if params.get('compile'):
         click.echo('Compiling model ', nl=False)
@@ -148,6 +170,9 @@ def test(ctx, **kwargs):
     table.add_row('Pages evaluated', str(results['num_pages']))
     table.add_row('Avg predicted lines/page', f'{results["avg_num_pred"]:.1f}')
     table.add_row('Avg GT lines/page', f'{results["avg_num_gt"]:.1f}')
+    truncated_pages = results.get('truncated_pages', 0)
+    truncated_str = f'{truncated_pages} / {results["num_pages"]}'
+    table.add_row('Pages truncated (no EOS)', truncated_str)
     table.add_row('', '')
     table.add_row('Detection Precision', f'{results["precision"]:.4f}')
     table.add_row('Detection Recall', f'{results["recall"]:.4f}')
@@ -159,5 +184,11 @@ def test(ctx, **kwargs):
                   f'{footrule:.4f}' if footrule == footrule else 'N/A')
     table.add_row('Kendall Tau',
                   f'{tau:.4f}' if tau == tau else 'N/A')
+    gt_cov = results.get('gt_coverage', float('nan'))
+    pred_cov = results.get('pred_coverage', float('nan'))
+    table.add_row('GT coverage (matched / GT)',
+                  f'{gt_cov:.4f}' if gt_cov == gt_cov else 'N/A')
+    table.add_row('Pred coverage (matched / pred)',
+                  f'{pred_cov:.4f}' if pred_cov == pred_cov else 'N/A')
 
     console.print(table)

@@ -122,6 +122,9 @@ logging.getLogger("lightning.fabric.utilities.seed").setLevel(logging.ERROR)
               type=click.Choice(['binary']),
               help='Sets the training data format.')
 @click.option('-is', '--image-size', type=(int, int), help='Network input image size.')
+@click.option('--baseline-num-points',
+              type=click.IntRange(4),
+              help='Number of fixed arc-length baseline points used for curve regression.')
 @click.option('--model-variant',
               type=click.Choice(['pico', 'tiny', 'small']),
               help='Model size preset to train.')
@@ -183,11 +186,9 @@ def train(ctx, **kwargs):
 
     torch.set_float32_matmul_precision('high')
 
-    # disable automatic partition when given evaluation set explicitly
     if params['evaluation_data']:
         params['partition'] = 1
 
-    # merge training_files into ground_truth list
     if training_data:
         ground_truth.extend(training_data)
 

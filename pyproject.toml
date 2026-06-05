@@ -24,14 +24,15 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "kraken~=7.0.0b5",
+    "kraken~=7.0.2",
     "timm",
     "python-bidi",
     "rich",
 ]
 
 [project.urls]
-Homepage = "https://kraken.re"
+Homepage = "https://github.com/mittagessen/orli"
+Repository = "https://github.com/mittagessen/orli"
 
 [project.scripts]
 orli = "orli.cli:cli"
@@ -57,6 +58,3 @@ default-version = "0.0.0"
 
 [tool.hatch.build.targets.wheel]
 packages = ["orli"]
-
-[tool.hatch.build.targets.sdist]
-include = ["orli/"]

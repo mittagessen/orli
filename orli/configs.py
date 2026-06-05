@@ -6,6 +6,8 @@ from kraken.configs import TrainingConfig, SegmentationTrainingDataConfig, Segme
 
 from importlib.resources import files
 
+from orli.modules.baseline import DEFAULT_NUM_BASELINE_POINTS
+
 with files('orli.assets').joinpath('anchors.json').open('r') as _fp:
     _default_anchors = tuple(tuple(row) for row in json.load(_fp))
 
@@ -53,6 +55,7 @@ MODEL_VARIANTS = {
 
 _DEFAULT_MODEL_VARIANT = 'tiny'
 
+
 class OrliSegmentationTrainingConfig(TrainingConfig):
     """
     Base configuration for training a D-FINE segmentation model.
@@ -64,6 +67,7 @@ class OrliSegmentationTrainingConfig(TrainingConfig):
         anchors = kwargs.pop('anchors', _default_anchors)
         self.anchors = anchors
         self.model_variant = kwargs.pop('model_variant', _DEFAULT_MODEL_VARIANT)
+        self.baseline_num_points = kwargs.pop('baseline_num_points', None) or DEFAULT_NUM_BASELINE_POINTS
         if self.model_variant not in MODEL_VARIANTS:
             choices = ', '.join(MODEL_VARIANTS)
             raise ValueError(f'Unknown model_variant {self.model_variant!r}. Choices: {choices}')
@@ -89,6 +93,7 @@ class OrliSegmentationTrainingDataConfig(SegmentationTrainingDataConfig):
     def __init__(self, **kwargs):
         self.val_batch_size = kwargs.pop('val_batch_size', None)
         self.image_size = kwargs.pop('image_size', (1280, 960))
+        self.baseline_num_points = kwargs.pop('baseline_num_points', None) or DEFAULT_NUM_BASELINE_POINTS
 
         kwargs['line_class_mapping'] = {'DefaultLine': 1}
         kwargs['region_class_mapping'] = {}  # no support for region detection
@@ -104,6 +109,7 @@ class OrliSegmentationInferenceConfig(SegmentationInferenceConfig):
     def __init__(self, **kwargs):
         self.max_predicted_lines = kwargs.pop('max_predicted_lines', 768)
         self.polygonize = kwargs.pop('polygonize', False)
+        self.baseline_num_points = kwargs.pop('baseline_num_points', None) or DEFAULT_NUM_BASELINE_POINTS
         super().__init__(**kwargs)
 
 

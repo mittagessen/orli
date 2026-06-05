@@ -40,9 +40,6 @@ class PyTorchLightningPruningCallback(Callback):
         self.monitor = monitor
 
     def on_validation_end(self, trainer: 'pl.Trainer', pl_module: 'pl.LightningModule') -> None:
-        # Trainer calls `on_validation_end` for sanity check. Therefore, it is necessary to avoid
-        # calling `trial.report` multiple times at epoch 0. For more details, see
-        # https://github.com/PyTorchLightning/pytorch-lightning/issues/1391.
         if trainer.sanity_checking:
             return
 
@@ -56,7 +53,6 @@ class PyTorchLightningPruningCallback(Callback):
             return
 
         epoch = pl_module.current_epoch
-        # Determine if the trial should be terminated in a single process.
         self._trial.report(current_score.item(), step=epoch)
         if not self._trial.should_prune():
             return

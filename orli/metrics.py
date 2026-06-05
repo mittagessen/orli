@@ -27,7 +27,7 @@ import logging
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import kendalltau
 
-from orli.modules.bezier import sample_bezier_curve
+from orli.modules.baseline import LOCAL_BASELINE_PARAM_DIM, local_params_to_polyline
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +215,6 @@ def compute_ordering_metrics(matches: list[tuple[int, int]],
         Dict with 'spearman_footrule', 'kendall_tau',
         'num_matched_for_ordering'.
     """
-    # Filter to well-matched pairs
     good = [(p, g) for (p, g), s in zip(matches, match_scores)
             if s.item() >= match_threshold]
 
@@ -224,12 +223,9 @@ def compute_ordering_metrics(matches: list[tuple[int, int]],
                 'kendall_tau': float('nan'),
                 'num_matched_for_ordering': len(good)}
 
-    # Sort by GT index and re-rank both to 0..n-1
     good.sort(key=lambda x: x[1])
     gt_ranks = list(range(len(good)))
-    # Pred indices in the order sorted by GT
     pred_indices = [p for p, _ in good]
-    # Convert to ranks (rank of each pred_index in sorted order)
     pred_rank_order = sorted(range(len(pred_indices)), key=lambda i: pred_indices[i])
     pred_ranks = [0] * len(pred_indices)
     for rank, idx in enumerate(pred_rank_order):
@@ -237,12 +233,10 @@ def compute_ordering_metrics(matches: list[tuple[int, int]],
 
     n = len(gt_ranks)
 
-    # Spearman's footrule: sum |pred_rank[i] - gt_rank[i]| / max_displacement
     footrule = sum(abs(pred_ranks[i] - gt_ranks[i]) for i in range(n))
-    max_footrule = n * n // 2  # floor(n^2/2)
+    max_footrule = n * n // 2
     norm_footrule = footrule / max_footrule if max_footrule > 0 else 0.0
 
-    # Kendall's tau
     tau, _ = kendalltau(pred_ranks, gt_ranks)
 
     return {'spearman_footrule': norm_footrule,
@@ -250,17 +244,18 @@ def compute_ordering_metrics(matches: list[tuple[int, int]],
             'num_matched_for_ordering': n}
 
 
-def _curves_to_polylines(curves: torch.Tensor,
-                         scale: torch.Tensor,
-                         num_samples: int = 20,
-                         spacing: float = 5.0) -> list[torch.Tensor]:
+def _baseline_vectors_to_polylines(curves: torch.Tensor,
+                                   image_size: tuple[int, int],
+                                   spacing: float = 5.0,
+                                   num_baseline_points: int | None = None) -> list[torch.Tensor]:
     """
-    Convert Bézier control points to uniformly-spaced polylines.
+    Convert baseline vectors to uniformly-spaced pixel polylines.
 
     Args:
-        curves: (S, 8) normalized control points.
-        scale: (8,) tensor of (w, h, w, h, w, h, w, h) for pixel scaling.
-        num_samples: Points to sample on each Bézier curve.
+        curves: ``(S, D)`` normalized baseline vectors. Supported formats are
+                local-frame baseline parameters (D=5+K points) and flat fixed
+                polylines (D=2*K points).
+        image_size: ``(width, height)`` used for denormalization.
         spacing: Target spacing for interpolation.
 
     Returns:
@@ -269,8 +264,17 @@ def _curves_to_polylines(curves: torch.Tensor,
     if curves.numel() == 0:
         return []
 
-    pixel_curves = curves * scale
-    sampled = sample_bezier_curve(pixel_curves, num_samples)  # (S, num_samples, 2)
+    w, h = image_size
+    point_scale = torch.tensor([w, h], dtype=curves.dtype, device=curves.device)
+
+    if num_baseline_points is not None and curves.shape[-1] == 2 * num_baseline_points:
+        sampled = curves.reshape(curves.shape[0], curves.shape[-1] // 2, 2) * point_scale
+    elif curves.shape[-1] > LOCAL_BASELINE_PARAM_DIM:
+        sampled = local_params_to_polyline(curves, num_points=num_baseline_points).clamp(0.0, 1.0) * point_scale
+    elif curves.shape[-1] % 2 == 0:
+        sampled = curves.reshape(curves.shape[0], curves.shape[-1] // 2, 2) * point_scale
+    else:
+        raise ValueError(f'Unsupported baseline vector width {curves.shape[-1]}.')
 
     polylines = []
     for i in range(sampled.shape[0]):
@@ -283,29 +287,38 @@ def evaluate_page(pred_curves: torch.Tensor,
                   image_size: tuple[int, int],
                   tol: float,
                   match_threshold: float = 0.5,
-                  num_samples: int = 20,
-                  spacing: float = 5.0) -> dict[str, float]:
+                  spacing: float = 5.0,
+                  num_baseline_points: int | None = None) -> dict[str, float]:
     """
     Full per-page evaluation.
 
     Args:
-        pred_curves: (S_pred, 8) predicted normalized curves (zero rows
-                     already filtered).
-        gt_curves: (S_gt, 8) ground truth normalized curves.
+        pred_curves: Predicted normalized baseline vectors (zero rows already
+                     filtered).
+        gt_curves: Ground-truth normalized baseline vectors or flat fixed
+                   polylines.
         image_size: (width, height) of the original image.
         tol: Tolerance in pixels.
         match_threshold: Minimum score for ordering evaluation.
-        num_samples: Bézier sampling density.
         spacing: Polyline interpolation spacing.
+        num_baseline_points: Fixed baseline point count.
 
     Returns:
         Combined dict of detection and ordering metrics.
     """
-    w, h = image_size
-    scale = torch.tensor([w, h] * 4, dtype=pred_curves.dtype)
+    if num_baseline_points is None and pred_curves.shape[-1] > LOCAL_BASELINE_PARAM_DIM:
+        num_baseline_points = pred_curves.shape[-1] - LOCAL_BASELINE_PARAM_DIM
+    elif num_baseline_points is not None:
+        num_baseline_points = int(num_baseline_points)
 
-    pred_polylines = _curves_to_polylines(pred_curves, scale, num_samples, spacing)
-    gt_polylines = _curves_to_polylines(gt_curves, scale, num_samples, spacing)
+    pred_polylines = _baseline_vectors_to_polylines(pred_curves,
+                                                    image_size,
+                                                    spacing,
+                                                    num_baseline_points)
+    gt_polylines = _baseline_vectors_to_polylines(gt_curves,
+                                                  image_size,
+                                                  spacing,
+                                                  num_baseline_points)
 
     det = compute_detection_metrics(pred_polylines, gt_polylines, tol)
 
@@ -348,20 +361,31 @@ def aggregate_metrics(page_metrics: list[dict[str, float]]) -> dict[str, float]:
     avg_num_pred = sum(m['num_pred'] for m in page_metrics) / n
     avg_num_gt = sum(m['num_gt'] for m in page_metrics) / n
 
-    # Ordering: skip NaN pages
     footrule_vals = [m['spearman_footrule'] for m in page_metrics
-                     if m['spearman_footrule'] == m['spearman_footrule']]  # NaN != NaN
+                     if m['spearman_footrule'] == m['spearman_footrule']]
     tau_vals = [m['kendall_tau'] for m in page_metrics
                 if m['kendall_tau'] == m['kendall_tau']]
 
     spearman_footrule = sum(footrule_vals) / len(footrule_vals) if footrule_vals else float('nan')
     kendall_tau_val = sum(tau_vals) / len(tau_vals) if tau_vals else float('nan')
 
+    gt_cov_vals = [m['num_matched_for_ordering'] / m['num_gt']
+                   for m in page_metrics if m.get('num_gt')]
+    pred_cov_vals = [m['num_matched_for_ordering'] / m['num_pred']
+                     for m in page_metrics if m.get('num_pred')]
+    gt_coverage = sum(gt_cov_vals) / len(gt_cov_vals) if gt_cov_vals else float('nan')
+    pred_coverage = sum(pred_cov_vals) / len(pred_cov_vals) if pred_cov_vals else float('nan')
+
+    truncated_count = sum(1 for m in page_metrics if m.get('truncated'))
+
     return {'precision': precision,
             'recall': recall,
             'f1': f1,
             'spearman_footrule': spearman_footrule,
             'kendall_tau': kendall_tau_val,
+            'gt_coverage': gt_coverage,
+            'pred_coverage': pred_coverage,
             'avg_num_pred': avg_num_pred,
             'avg_num_gt': avg_num_gt,
-            'num_pages': n}
+            'num_pages': n,
+            'truncated_pages': truncated_count}

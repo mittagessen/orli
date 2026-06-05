@@ -32,13 +32,14 @@ from kraken.models import create_model
 
 from torchvision.ops import sigmoid_focal_loss
 
-from orli.modules.bezier import sample_bezier_curve
 from orli.dataset import (get_default_transforms, BaselineSegmentationDataset,
                           collate_curves, _validation_worker_init_fn)
 from orli.configs import (OrliSegmentationTrainingConfig,
                           OrliSegmentationTrainingDataConfig,
                           OrliSegmentationTestConfig)
 from orli.metrics import evaluate_page, aggregate_metrics
+from orli.modules.baseline import (DEFAULT_NUM_BASELINE_POINTS,
+                                   curve_vector_to_polyline)
 
 logger = logging.getLogger(__name__)
 CURVE_STATS_INTERVAL = 200
@@ -49,21 +50,13 @@ if TYPE_CHECKING:
     from os import PathLike
 
 
-def _orli_model_kwargs(config, image_size):
-    return {'config': _orli_serialized_config(config),
-            'image_size': image_size}
-
-
-def _orli_serialized_config(config):
-    return {'anchors': config.anchors,
-            'model_variant': config.model_variant}
-
-
 def _nearest_anchor_idx_by_geometry(curves: torch.Tensor,
                                     anchor_table: torch.Tensor,
-                                    num_samples: int = 20) -> torch.Tensor:
-    curve_points = sample_bezier_curve(curves, num_samples=num_samples).flatten(1)
-    anchor_points = sample_bezier_curve(anchor_table, num_samples=num_samples).flatten(1)
+                                    num_points: int) -> torch.Tensor:
+    curve_points = curve_vector_to_polyline(curves,
+                                            num_points=num_points).flatten(1)
+    anchor_points = curve_vector_to_polyline(anchor_table,
+                                             num_points=num_points).flatten(1)
     dists = torch.cdist(curve_points, anchor_points, p=1)
     return dists.argmin(dim=-1)
 
@@ -101,27 +94,29 @@ def model_step(model,
                curve_criterion,
                batch):
 
-    tokens = batch['tokens']
-    curves = batch['curves']
-    # shift the tokens to create targets
+    tokens = batch['tokens'].clone()
+    curves = batch['curves'].clone()
+    polylines = batch['polylines']
     ignore_idxs_tokens = torch.full((tokens.shape[0], 1, tokens.shape[2]),
                                     -1,
                                     dtype=tokens.dtype, device=tokens.device)
     ignore_idxs_curves = torch.full((curves.shape[0], 1, curves.shape[2]),
                                     -1,
                                     dtype=curves.dtype, device=curves.device)
+    ignore_idxs_polylines = torch.full((polylines.shape[0], 1, polylines.shape[2]),
+                                       -1,
+                                       dtype=polylines.dtype, device=polylines.device)
 
     target_tokens = torch.hstack((tokens[..., 1:, :], ignore_idxs_tokens))
     target_curves = torch.hstack((curves[..., 1:, :], ignore_idxs_curves))
+    target_polylines = torch.hstack((polylines[..., 1:, :], ignore_idxs_polylines))
 
     valid_tokens_mask = target_tokens[..., 0] != -1
     valid_curves_mask = target_curves[..., 0] != -1
     num_token_targets = valid_tokens_mask.sum().clamp_min(1)
     num_curve_targets = valid_curves_mask.sum().clamp_min(1)
 
-    # precompute target class indices. Anchor supervision is handled by a
-    # dedicated anchor head and no longer overloads the token vocabulary.
-    target_cls_indices = target_tokens.argmax(dim=-1)  # [b, s]
+    target_cls_indices = target_tokens.argmax(dim=-1)
     regressor = model.nn['regressor']
     if regressor.num_anchors <= 1:
         raise RuntimeError('model_step expects multi-anchor training with anchor supervision enabled.')
@@ -129,15 +124,16 @@ def model_step(model,
     target_anchor_idx = None
     line_anchor_mask = valid_curves_mask & (target_cls_indices == 3)
     num_anchor_targets = line_anchor_mask.sum().clamp_min(1)
-    anchor_table = regressor.curve_anchors  # [num_anchors, 8]
+    anchor_table = regressor.curve_anchors
     full_anchor_idx = torch.full_like(target_cls_indices, -1)
-    valid_gt = target_curves[line_anchor_mask]  # [M, 8]
-    nearest = _nearest_anchor_idx_by_geometry(valid_gt, anchor_table)
+    valid_gt = target_curves[line_anchor_mask]
+    baseline_num_points = getattr(regressor, 'num_baseline_points', DEFAULT_NUM_BASELINE_POINTS)
+    nearest = _nearest_anchor_idx_by_geometry(valid_gt,
+                                             anchor_table,
+                                             baseline_num_points)
     full_anchor_idx[line_anchor_mask] = nearest
     target_anchor_idx = full_anchor_idx
 
-    # our tokens already contain BOS/EOS tokens so we just run it
-    # through the model after replacing ignored indices.
     tokens.masked_fill_(tokens == -1.0, 0)
     curves.masked_fill_(curves == -1.0, 0)
 
@@ -149,24 +145,24 @@ def model_step(model,
     num_iters = logits['curves'].shape[0]
     final_curve_loss = None
 
-    # valid targets (computed once)
     batch_target_cls = target_cls_indices[valid_tokens_mask]
     batch_target_curves = target_curves[valid_curves_mask]
+    num_polyline_points = polylines.shape[-1] // 2
+    batch_target_polylines = target_polylines[valid_curves_mask].reshape(batch_target_curves.shape[0],
+                                                                         num_polyline_points,
+                                                                         2)
 
     for pred_curves in logits['curves']:
         pred_curves = pred_curves[valid_curves_mask]
 
-        # sample points from curves
-        pred_points = sample_bezier_curve(pred_curves)
-        target_points = sample_bezier_curve(batch_target_curves)
-        curve_points_loss = curve_criterion(pred_points, target_points) / num_curve_targets
-        curve_ctrl_loss = curve_criterion(pred_curves, batch_target_curves) / num_curve_targets
-        curve_loss = curve_points_loss + curve_ctrl_loss
+        pred_points = curve_vector_to_polyline(pred_curves,
+                                               num_points=baseline_num_points)
+        curve_points_loss = curve_criterion(pred_points, batch_target_polylines) / num_curve_targets
+        curve_param_loss = curve_criterion(pred_curves, batch_target_curves) / num_curve_targets
+        curve_loss = curve_points_loss + curve_param_loss
         curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
         final_curve_loss = curve_loss
 
-    # Supervise all token classifier heads over the original BOS/EOS/LINE
-    # vocabulary. Anchor identity is handled by a separate anchor head.
     cls_loss = None
     for pred_tokens in logits['tokens']:
         pred_tokens = pred_tokens[valid_tokens_mask]
@@ -203,16 +199,21 @@ class OrliSegmentationDataModule(L.LightningDataModule):
 
         im_transforms = get_default_transforms(image_size=data_config.image_size,
                                                normalize=False)
+        baseline_num_points = getattr(data_config,
+                                      'baseline_num_points',
+                                      DEFAULT_NUM_BASELINE_POINTS) or DEFAULT_NUM_BASELINE_POINTS
 
         if data_config.training_data and data_config.evaluation_data:
             self.train_set = BaselineSegmentationDataset(data_config.training_data,
                                                          im_transforms=im_transforms,
                                                          augmentation=data_config.augment,
+                                                         baseline_num_points=baseline_num_points,
                                                          bos_token_id=self.bos_token_id,
                                                          eos_token_id=self.eos_token_id,
                                                          line_token_id=self.line_token_id)
             self.val_set = BaselineSegmentationDataset(data_config.evaluation_data,
                                                        im_transforms=im_transforms,
+                                                       baseline_num_points=baseline_num_points,
                                                        bos_token_id=self.bos_token_id,
                                                        eos_token_id=self.eos_token_id,
                                                        line_token_id=self.line_token_id)
@@ -226,6 +227,7 @@ class OrliSegmentationDataModule(L.LightningDataModule):
         elif data_config.test_data:
             self.test_set = BaselineSegmentationDataset(data_config.test_data,
                                                         im_transforms=im_transforms,
+                                                        baseline_num_points=baseline_num_points,
                                                         bos_token_id=self.bos_token_id,
                                                         eos_token_id=self.eos_token_id,
                                                         line_token_id=self.line_token_id)
@@ -449,6 +451,10 @@ class OrliSegmentationModel(L.LightningModule):
         if pred_curves.dim() == 2:
             pred_curves = pred_curves.unsqueeze(0)
 
+        eos_reached = getattr(self.net, '_last_eos_reached', None)
+        if eos_reached is not None:
+            eos_reached = eos_reached.detach().cpu()
+
         image_size = (images.shape[-1], images.shape[-2])
 
         for idx in range(images.shape[0]):
@@ -456,7 +462,7 @@ class OrliSegmentationModel(L.LightningModule):
             pred = pred[pred.abs().sum(dim=-1) > 0]
             pred = pred.cpu().float()
 
-            gt = batch['curves'][idx]
+            gt = batch['polylines'][idx]
             if gt.shape[0] > 0:
                 gt = gt[1:]
             gt = gt[gt[..., 0] != -1]
@@ -466,7 +472,14 @@ class OrliSegmentationModel(L.LightningModule):
                                     gt_curves=gt,
                                     image_size=image_size,
                                     tol=self.test_tolerance,
-                                    match_threshold=self.test_match_threshold)
+                                    match_threshold=self.test_match_threshold,
+                                    num_baseline_points=getattr(self.net,
+                                                                'baseline_num_points',
+                                                                None))
+            if eos_reached is not None and idx < eos_reached.numel():
+                metrics['truncated'] = bool(not eos_reached[idx].item())
+            else:
+                metrics['truncated'] = False
             self._test_page_metrics.append(metrics)
 
     def on_test_epoch_end(self):
@@ -481,8 +494,10 @@ class OrliSegmentationModel(L.LightningModule):
         if stage in [None, 'fit']:
             if self.net is None:
                 self.net = create_model('OrliModel',
-                                        **_orli_model_kwargs(self.hparams.config,
-                                                             self.trainer.datamodule.hparams.data_config.image_size))
+                                        model_variant=self.hparams.config.model_variant,
+                                        image_size=self.trainer.datamodule.hparams.data_config.image_size,
+                                        anchors=self.hparams.config.anchors,
+                                        baseline_num_points=self.hparams.config.baseline_num_points)
 
             if self.hparams.config.freeze_encoder:
                 for param in self.net.nn['encoder'].parameters():
@@ -508,7 +523,10 @@ class OrliSegmentationModel(L.LightningModule):
         data_config = checkpoint['datamodule_hyper_parameters']['data_config']
         cfg = checkpoint['_module_config']
         self.net = create_model('OrliModel',
-                                **_orli_model_kwargs(cfg, data_config.image_size))
+                                model_variant=cfg.model_variant,
+                                image_size=data_config.image_size,
+                                anchors=cfg.anchors,
+                                baseline_num_points=cfg.baseline_num_points)
 
     @classmethod
     def load_from_weights(cls,
@@ -527,14 +545,11 @@ class OrliSegmentationModel(L.LightningModule):
                 break
         if model is None:
             raise ValueError('No OrliModel found in weights file.')
-        model_config = model.user_metadata.get('config')
-        if not isinstance(model_config, dict):
-            raise ValueError('OrliModel weights do not contain a valid model configuration.')
         if config is None:
-            config = OrliSegmentationTrainingConfig(**model_config)
-        else:
-            for key, value in model_config.items():
-                setattr(config, key, value)
+            config = OrliSegmentationTrainingConfig()
+        config.model_variant = model.user_metadata['model_variant']
+        config.anchors = model.user_metadata['anchors']
+        config.baseline_num_points = model.user_metadata['baseline_num_points']
         return cls(config=config, model=model)
 
     def configure_callbacks(self):
@@ -547,36 +562,27 @@ class OrliSegmentationModel(L.LightningModule):
 
         return callbacks
 
-    # configuration of optimizers and learning rate schedulers
-    # --------------------------------------------------------
-    #
     # All schedulers are created internally with a frequency of step to enable
     # batch-wise learning rate warmup. In lr_scheduler_step() calls to the
     # scheduler are then only performed at the end of the epoch.
     def configure_optimizers(self):
-        # Selective learning rates: lower LR for pretrained encoder, full LR otherwise.
-        # Muon only works with 2D parameters (weight matrices). Everything else
-        # (biases, norms, embeddings, 1D params) must use AdamW.
+        # Muon handles 2D weight matrices; AdamW handles everything else.
         lr_map = {}
 
-        # Encoder (pretrained) - lower LR when unfrozen
         encoder_lr = self.hparams.config.lrate * 0.1
         for p in self.net.nn['encoder'].parameters():
             if p.requires_grad:
                 lr_map[id(p)] = encoder_lr
 
-        # Regressor - higher LR
         regressor_lr = self.hparams.config.lrate * 5.0
         for p in self.net.nn['regressor'].parameters():
             if p.requires_grad:
                 lr_map[id(p)] = regressor_lr
 
-        # Everything else (decoder + neck) - full LR
         for p in self.net.parameters():
             if p.requires_grad and id(p) not in lr_map:
                 lr_map[id(p)] = self.hparams.config.lrate
 
-        # Split into Muon (2D) and AdamW (non-2D) param groups, keyed by lr
         muon_by_lr = {}
         adam_by_lr = {}
         for p in self.net.parameters():
@@ -601,7 +607,6 @@ class OrliSegmentationModel(L.LightningModule):
                         'betas': (0.9, 0.999)},
         )
 
-        # Configure learning rate scheduler
         len_train_set = len(self.trainer.datamodule.train_set)
         batch_size = self.trainer.datamodule.hparams.data_config.batch_size
         accumulate = self.hparams.config.accumulate_grad_batches
@@ -652,11 +657,8 @@ class OrliSegmentationModel(L.LightningModule):
         }
 
     def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure):
-        # update params
         optimizer.step(closure=optimizer_closure)
 
-        # linear warmup between 0 and the initial learning rate in `warmup` steps.
-        # Each param group has its own target lr (encoder has lower lr).
         if self.hparams.config.warmup and self.trainer.global_step < self.hparams.config.warmup:
             lr_scale = min(1.0, float(self.trainer.global_step + 1) / self.hparams.config.warmup)
             for pg in optimizer.param_groups:

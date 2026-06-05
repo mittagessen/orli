@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Training and evaluation outputs
+lightning_logs/
+wandb/
+checkpoints/
+experiments/
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+
+# Local datasets and manifests
+*.arrow
+*.lst
+
+# Build artifacts
+build/
+dist/
+*.whl
+*.tar.gz
