@@ -91,9 +91,6 @@ def test(ctx, **kwargs):
     accelerator = ctx.meta['accelerator']
     devices = ctx.meta['devices']
 
-    # The inference Fabric inside the model reads `accelerator`/`device` from
-    # the test config; without these, it defaults to 'auto' and lands on cuda:0
-    # even when the Trainer is on a different GPU.
     params['accelerator'] = accelerator
     params['device'] = devices
 
@@ -111,9 +108,7 @@ def test(ctx, **kwargs):
     if model_points is not None:
         params['baseline_num_points'] = model_points
 
-    # Use the image size the model was trained with so the encoder sees the
-    # same resolution it produced its KV-cache shape for. Otherwise high-res
-    # fine-tunes crash with cross-attention mask mismatches.
+    # Match the trained image size to keep encoder and KV-cache shapes aligned.
     model_image_size = None
     if model.net is not None:
         model_image_size = model.net.user_metadata.get('image_size')

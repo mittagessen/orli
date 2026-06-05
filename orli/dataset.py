@@ -239,7 +239,6 @@ class BaselineSegmentationDataset(Dataset):
                  augmentation: bool = False,
                  max_lines_per_page: int = 768,
                  baseline_num_points: int = DEFAULT_NUM_BASELINE_POINTS,
-                 direct_point_regression: bool = False,
                  bos_token_id: int = 1,
                  eos_token_id: int = 2,
                  line_token_id: int = 3) -> None:
@@ -250,9 +249,7 @@ class BaselineSegmentationDataset(Dataset):
         self.max_lines_in_page = 0
         self.max_lines_per_page = max_lines_per_page
         self.baseline_num_points = int(baseline_num_points)
-        self.direct_point_regression = bool(direct_point_regression)
-        self.baseline_dim = curve_vector_dim(self.baseline_num_points,
-                                             self.direct_point_regression)
+        self.baseline_dim = curve_vector_dim(self.baseline_num_points)
         self.polyline_dim = baseline_polyline_dim(self.baseline_num_points)
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
@@ -282,11 +279,9 @@ class BaselineSegmentationDataset(Dataset):
             self.aug = DefaultAugmenter()
 
     def __getitem__(self, index: int):
-        # just sample from a random page
         item = self.arrow_table.column('pages')[index].as_py()
         logger.debug(f'Attempting to load {item["im"]}')
         im, page_data = item['im'], item['lines']
-        # skip pages with more than max_pos_embeddings lines
         if len(page_data) + 2 >= self.max_lines_per_page:
             idx = int(self.rng.integers(0, len(self)))
             return self[idx]
@@ -309,8 +304,7 @@ class BaselineSegmentationDataset(Dataset):
                 raise ValueError(f'Expected polyline with shape [n, 2], got {tuple(source_points.shape)}.')
             points = fixed_arc_length_resample(source_points.reshape(-1, 2).clamp(0.0, 1.0),
                                                num_points=self.baseline_num_points)
-            params = polyline_to_curve_vector(points,
-                                              direct_point_regression=self.direct_point_regression)
+            params = polyline_to_curve_vector(points)
             polylines.append(points.reshape(self.polyline_dim))
             lines.append(params)
 
@@ -320,8 +314,6 @@ class BaselineSegmentationDataset(Dataset):
         polylines.append(torch.full((self.polyline_dim,), -1.0, dtype=torch.float32))
         polylines.insert(0, torch.zeros(self.polyline_dim, dtype=torch.float32))
         polylines = torch.stack(polylines, dim=0)
-        # one-hot encode cls here so we can embed curves and classes with a
-        # single linear projection.
         line_cls = torch.full((len(lines),), self.line_token_id, dtype=torch.long)
         line_cls[0] = self.bos_token_id
         line_cls[-1] = self.eos_token_id

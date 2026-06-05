@@ -56,18 +56,6 @@ MODEL_VARIANTS = {
 _DEFAULT_MODEL_VARIANT = 'tiny'
 
 
-def _bool_default(value, default: bool) -> bool:
-    if value is None:
-        return default
-    return bool(value)
-
-
-def _float_default(value, default: float) -> float:
-    if value is None:
-        return default
-    return float(value)
-
-
 class OrliSegmentationTrainingConfig(TrainingConfig):
     """
     Base configuration for training a D-FINE segmentation model.
@@ -80,19 +68,6 @@ class OrliSegmentationTrainingConfig(TrainingConfig):
         self.anchors = anchors
         self.model_variant = kwargs.pop('model_variant', _DEFAULT_MODEL_VARIANT)
         self.baseline_num_points = kwargs.pop('baseline_num_points', None) or DEFAULT_NUM_BASELINE_POINTS
-        self.curve_fourier_features = _bool_default(kwargs.pop('curve_fourier_features', None), False)
-        self.anchor_embedding = _bool_default(kwargs.pop('anchor_embedding', None), False)
-        kwargs.pop('soft_anchors', None)
-        self.line_refiner = _bool_default(kwargs.pop('line_refiner', None), True)
-        self.direct_point_regression = _bool_default(kwargs.pop('direct_point_regression', None), False)
-        self.curve_prompt_noise_prob = _float_default(kwargs.pop('curve_prompt_noise_prob', None), 0.0)
-        self.curve_prompt_noise_normal_px = _float_default(kwargs.pop('curve_prompt_noise_normal_px', None), 0.0)
-        self.curve_prompt_noise_tangent_px = _float_default(kwargs.pop('curve_prompt_noise_tangent_px', None), 0.0)
-        self.curve_prompt_noise_curvature_px = _float_default(kwargs.pop('curve_prompt_noise_curvature_px', None), 0.0)
-        self.pre_refiner_noise_prob = _float_default(kwargs.pop('pre_refiner_noise_prob', None), 0.0)
-        self.pre_refiner_noise_normal_px = _float_default(kwargs.pop('pre_refiner_noise_normal_px', None), 0.0)
-        self.pre_refiner_noise_tangent_px = _float_default(kwargs.pop('pre_refiner_noise_tangent_px', None), 0.0)
-        self.pre_refiner_noise_curvature_px = _float_default(kwargs.pop('pre_refiner_noise_curvature_px', None), 0.0)
         if self.model_variant not in MODEL_VARIANTS:
             choices = ', '.join(MODEL_VARIANTS)
             raise ValueError(f'Unknown model_variant {self.model_variant!r}. Choices: {choices}')
@@ -119,19 +94,6 @@ class OrliSegmentationTrainingDataConfig(SegmentationTrainingDataConfig):
         self.val_batch_size = kwargs.pop('val_batch_size', None)
         self.image_size = kwargs.pop('image_size', (1280, 960))
         self.baseline_num_points = kwargs.pop('baseline_num_points', None) or DEFAULT_NUM_BASELINE_POINTS
-        self.direct_point_regression = _bool_default(kwargs.pop('direct_point_regression', None), False)
-        kwargs.pop('curve_fourier_features', None)
-        kwargs.pop('anchor_embedding', None)
-        kwargs.pop('soft_anchors', None)
-        kwargs.pop('line_refiner', None)
-        kwargs.pop('curve_prompt_noise_prob', None)
-        kwargs.pop('curve_prompt_noise_normal_px', None)
-        kwargs.pop('curve_prompt_noise_tangent_px', None)
-        kwargs.pop('curve_prompt_noise_curvature_px', None)
-        kwargs.pop('pre_refiner_noise_prob', None)
-        kwargs.pop('pre_refiner_noise_normal_px', None)
-        kwargs.pop('pre_refiner_noise_tangent_px', None)
-        kwargs.pop('pre_refiner_noise_curvature_px', None)
 
         kwargs['line_class_mapping'] = {'DefaultLine': 1}
         kwargs['region_class_mapping'] = {}  # no support for region detection
@@ -148,19 +110,6 @@ class OrliSegmentationInferenceConfig(SegmentationInferenceConfig):
         self.max_predicted_lines = kwargs.pop('max_predicted_lines', 768)
         self.polygonize = kwargs.pop('polygonize', False)
         self.baseline_num_points = kwargs.pop('baseline_num_points', None) or DEFAULT_NUM_BASELINE_POINTS
-        self.direct_point_regression = _bool_default(kwargs.pop('direct_point_regression', None), False)
-        kwargs.pop('curve_fourier_features', None)
-        kwargs.pop('anchor_embedding', None)
-        kwargs.pop('soft_anchors', None)
-        kwargs.pop('line_refiner', None)
-        kwargs.pop('curve_prompt_noise_prob', None)
-        kwargs.pop('curve_prompt_noise_normal_px', None)
-        kwargs.pop('curve_prompt_noise_tangent_px', None)
-        kwargs.pop('curve_prompt_noise_curvature_px', None)
-        kwargs.pop('pre_refiner_noise_prob', None)
-        kwargs.pop('pre_refiner_noise_normal_px', None)
-        kwargs.pop('pre_refiner_noise_tangent_px', None)
-        kwargs.pop('pre_refiner_noise_curvature_px', None)
         super().__init__(**kwargs)
 
 

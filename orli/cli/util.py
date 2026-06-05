@@ -81,7 +81,6 @@ def _load_config(ctx: click.Context,
     if path:
         try:
             conf = yaml.safe_load(path)
-            # Update the default_map.
             if ctx.default_map is None:
                 ctx.default_map = {}
             ctx.default_map = _recursive_update(ctx.default_map, conf, ctx.command)

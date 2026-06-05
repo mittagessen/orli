@@ -20,7 +20,7 @@ import torch
 from safetensors.torch import save_file, _remove_duplicate_names
 from typing import Optional, Union, TYPE_CHECKING
 
-from orli.modules.baseline import DEFAULT_NUM_BASELINE_POINTS, baseline_param_dim
+from orli.modules.baseline import DEFAULT_NUM_BASELINE_POINTS
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -34,21 +34,7 @@ def checkpoint_to_kraken(checkpoint_path: Union[str, 'PathLike'],
     safetensors-based kraken serialization format.
     """
     state_dict = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=True)
-    # we do not have configurable encoders/decoders
-    config = {"baseline_num_points": DEFAULT_NUM_BASELINE_POINTS,
-              "decoder_vocab_size": 4 + baseline_param_dim(DEFAULT_NUM_BASELINE_POINTS),
-              "decoder_num_layers": 4,
-              "decoder_num_heads": 9,
-              "decoder_num_kv_heads": 3,
-              "decoder_embed_dim": 576,
-              "decoder_max_seq_len": 768,
-              "decoder_intermediate_dim": 1536,
-              "decoder_attn_dropout": 0.0,
-              "decoder_norm_eps": 1e-05,
-              "decoder_rope_base": 10000,
-              "encoder_name": state_dict['hyper_parameters']['encoder'],
-              "encoder_input_size": state_dict['hyper_parameters']['encoder_input_size'],
-              'encoder_idxs': state_dict['hyper_parameters']['encoder_idxs']}
+    config = {"baseline_num_points": DEFAULT_NUM_BASELINE_POINTS}
     model_type = 'kraken_orli'
     metadata = {'model_type': model_type,
                 'config': json.dumps(config)}
@@ -66,8 +52,6 @@ def checkpoint_to_kraken(checkpoint_path: Union[str, 'PathLike'],
                 metadata[to_remove] = kept_name
             del state_dict[to_remove]
 
-    # we can just save the state dict as our constructor sets up the tensor
-    # sharing.
     save_file(state_dict, filename, metadata=metadata)
 
 

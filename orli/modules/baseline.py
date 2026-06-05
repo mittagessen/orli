@@ -26,8 +26,6 @@ vector:
 
     p_i = c + (s_i - 0.5) * L * u + d_i * n
 """
-from __future__ import annotations
-
 import math
 
 import torch
@@ -44,13 +42,10 @@ def baseline_polyline_dim(num_points: int = DEFAULT_NUM_BASELINE_POINTS) -> int:
     return 2 * int(num_points)
 
 
-def curve_vector_dim(num_points: int = DEFAULT_NUM_BASELINE_POINTS,
-                     direct_point_regression: bool = False) -> int:
+def curve_vector_dim(num_points: int = DEFAULT_NUM_BASELINE_POINTS) -> int:
     """
-    Returns the trainable curve vector width for the selected representation.
+    Returns the trainable local-frame curve vector width.
     """
-    if direct_point_regression:
-        return baseline_polyline_dim(num_points)
     return baseline_param_dim(num_points)
 
 
@@ -181,137 +176,35 @@ def local_params_to_polyline(params: torch.Tensor,
     return base + offsets.unsqueeze(-1) * n.unsqueeze(-2)
 
 
-def polyline_to_curve_vector(points: torch.Tensor,
-                             direct_point_regression: bool = False) -> torch.Tensor:
+def polyline_to_curve_vector(points: torch.Tensor) -> torch.Tensor:
     """
-    Encodes fixed-size polylines in the selected trainable representation.
+    Encodes fixed-size polylines as local-frame baseline vectors.
     """
-    if direct_point_regression:
-        return points.clamp(0.0, 1.0).reshape(*points.shape[:-2], points.shape[-2] * 2)
     return polyline_to_local_params(points)
 
 
 def curve_vector_to_polyline(curves: torch.Tensor,
-                             direct_point_regression: bool = False,
                              num_points: int | None = None) -> torch.Tensor:
     """
-    Decodes trainable curve vectors to fixed-size normalized polylines.
+    Decodes local-frame baseline vectors to fixed-size normalized polylines.
     """
-    if direct_point_regression:
-        if num_points is None:
-            if curves.shape[-1] % 2 != 0:
-                raise ValueError(f'Expected an even direct point vector width, got {curves.shape[-1]}.')
-            num_points = curves.shape[-1] // 2
-        expected = baseline_polyline_dim(num_points)
-        if curves.shape[-1] != expected:
-            raise ValueError(f'Expected direct point curve dim {expected}, got {curves.shape[-1]}.')
-        return curves.reshape(*curves.shape[:-1], num_points, 2)
     return local_params_to_polyline(curves, num_points=num_points)
 
 
-def add_curve_noise(curves: torch.Tensor,
-                    image_size: tuple[int, int],
-                    *,
-                    direct_point_regression: bool = False,
-                    num_points: int = DEFAULT_NUM_BASELINE_POINTS,
-                    mask: torch.Tensor | None = None,
-                    prob: float = 1.0,
-                    normal_px: float = 0.0,
-                    tangent_px: float = 0.0,
-                    curvature_px: float = 0.0) -> torch.Tensor:
-    """
-    Perturbs curve vectors by applying smooth pixel-space polyline noise.
-
-    Noise is sampled in image coordinates, decomposed into tangent and normal
-    directions at each baseline point, and re-encoded into the active trainable
-    curve representation. ``normal_px`` and ``tangent_px`` shift the whole line;
-    ``curvature_px`` adds a smooth normal displacement that is zero at both
-    endpoints and largest near the line center.
-    """
-    if prob <= 0.0 or max(normal_px, tangent_px, curvature_px) <= 0.0:
-        return curves
-
-    if num_points < 2:
-        return curves
-
-    orig_dtype = curves.dtype
-    work_dtype = torch.float32
-    points = curve_vector_to_polyline(curves.to(dtype=work_dtype),
-                                      direct_point_regression=direct_point_regression,
-                                      num_points=num_points).clamp(0.0, 1.0)
-    scale = torch.tensor([float(image_size[0]), float(image_size[1])],
-                         dtype=work_dtype,
-                         device=curves.device)
-    points_px = points * scale.view(*([1] * (points.ndim - 1)), 2)
-
-    first = points_px[..., 1:2, :] - points_px[..., 0:1, :]
-    middle = points_px[..., 2:, :] - points_px[..., :-2, :]
-    last = points_px[..., -1:, :] - points_px[..., -2:-1, :]
-    tangents = torch.cat([first, middle, last], dim=-2)
-    tangents = tangents / torch.linalg.vector_norm(tangents,
-                                                   dim=-1,
-                                                   keepdim=True).clamp_min(1e-6)
-    normals = torch.stack([-tangents[..., 1], tangents[..., 0]], dim=-1)
-
-    line_shape = curves.shape[:-1]
-    if mask is None:
-        sample_mask = torch.ones(line_shape, dtype=torch.bool, device=curves.device)
-    else:
-        sample_mask = mask.to(device=curves.device, dtype=torch.bool)
-    if prob < 1.0:
-        sample_mask = sample_mask & (torch.rand(line_shape, device=curves.device) < prob)
-
-    noise_shape = (*line_shape, 1, 1)
-    normal_noise = torch.zeros(noise_shape, dtype=work_dtype, device=curves.device)
-    tangent_noise = torch.zeros(noise_shape, dtype=work_dtype, device=curves.device)
-    if normal_px > 0.0:
-        normal_noise = normal_noise + torch.randn(noise_shape,
-                                                  dtype=work_dtype,
-                                                  device=curves.device) * normal_px
-    if tangent_px > 0.0:
-        tangent_noise = tangent_noise + torch.randn(noise_shape,
-                                                    dtype=work_dtype,
-                                                    device=curves.device) * tangent_px
-    if curvature_px > 0.0:
-        s = torch.linspace(-1.0, 1.0, num_points, dtype=work_dtype, device=curves.device)
-        basis = (1.0 - s.square()).view(*([1] * len(line_shape)), num_points, 1)
-        normal_noise = normal_noise + (torch.randn(noise_shape,
-                                                   dtype=work_dtype,
-                                                   device=curves.device) *
-                                       curvature_px *
-                                       basis)
-
-    apply_mask = sample_mask.to(dtype=work_dtype).view(*line_shape, 1, 1)
-    noisy_points_px = points_px + apply_mask * (tangents * tangent_noise +
-                                                normals * normal_noise)
-    noisy_points = (noisy_points_px / scale.view(*([1] * (points.ndim - 1)), 2)).clamp(0.0, 1.0)
-    noisy_curves = polyline_to_curve_vector(noisy_points,
-                                            direct_point_regression=direct_point_regression)
-    return torch.where(sample_mask.unsqueeze(-1), noisy_curves.to(dtype=orig_dtype), curves)
-
-
 def prepare_baseline_anchors(anchors: torch.Tensor,
-                             num_points: int = DEFAULT_NUM_BASELINE_POINTS,
-                             direct_point_regression: bool = False) -> torch.Tensor:
+                             num_points: int = DEFAULT_NUM_BASELINE_POINTS) -> torch.Tensor:
     """
-    Converts anchor tables in fixed-polyline or local-param form to the selected
-    trainable curve representation.
+    Converts anchor tables in fixed-polyline or local-param form to local-frame
+    curve vectors.
     """
     anchors = anchors.float()
     local_dim = baseline_param_dim(num_points)
     point_dim = baseline_polyline_dim(num_points)
 
-    if direct_point_regression:
-        if anchors.shape[-1] == point_dim:
-            return anchors.clamp(1e-5, 1.0 - 1e-5)
-        if anchors.shape[-1] == local_dim:
-            points = local_params_to_polyline(anchors, num_points=num_points)
-            return points.reshape(*points.shape[:-2], point_dim).clamp(1e-5, 1.0 - 1e-5)
-    else:
-        if anchors.shape[-1] == local_dim:
-            return anchors.clamp(1e-5, 1.0 - 1e-5)
-        if anchors.shape[-1] == point_dim:
-            points = anchors.reshape(*anchors.shape[:-1], num_points, 2)
-            return polyline_to_local_params(points).clamp(1e-5, 1.0 - 1e-5)
+    if anchors.shape[-1] == local_dim:
+        return anchors.clamp(1e-5, 1.0 - 1e-5)
+    if anchors.shape[-1] == point_dim:
+        points = anchors.reshape(*anchors.shape[:-1], num_points, 2)
+        return polyline_to_local_params(points).clamp(1e-5, 1.0 - 1e-5)
 
     raise ValueError(f'Unsupported anchor width {anchors.shape[-1]}; expected {point_dim} or {local_dim}.')

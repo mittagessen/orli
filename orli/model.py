@@ -39,7 +39,6 @@ from orli.configs import (OrliSegmentationTrainingConfig,
                           OrliSegmentationTestConfig)
 from orli.metrics import evaluate_page, aggregate_metrics
 from orli.modules.baseline import (DEFAULT_NUM_BASELINE_POINTS,
-                                   add_curve_noise,
                                    curve_vector_to_polyline)
 
 logger = logging.getLogger(__name__)
@@ -51,41 +50,12 @@ if TYPE_CHECKING:
     from os import PathLike
 
 
-def _orli_model_kwargs(config, image_size):
-    return {'config': _orli_serialized_config(config),
-            'image_size': image_size}
-
-
-def _orli_serialized_config(config):
-    baseline_num_points = getattr(config,
-                                  'baseline_num_points',
-                                  DEFAULT_NUM_BASELINE_POINTS) or DEFAULT_NUM_BASELINE_POINTS
-    return {'anchors': config.anchors,
-            'model_variant': config.model_variant,
-            'baseline_num_points': baseline_num_points,
-            'curve_fourier_features': getattr(config, 'curve_fourier_features', True),
-            'anchor_embedding': getattr(config, 'anchor_embedding', True),
-            'line_refiner': getattr(config, 'line_refiner', False),
-            'direct_point_regression': getattr(config, 'direct_point_regression', False),
-            'curve_prompt_noise_prob': getattr(config, 'curve_prompt_noise_prob', 0.0),
-            'curve_prompt_noise_normal_px': getattr(config, 'curve_prompt_noise_normal_px', 0.0),
-            'curve_prompt_noise_tangent_px': getattr(config, 'curve_prompt_noise_tangent_px', 0.0),
-            'curve_prompt_noise_curvature_px': getattr(config, 'curve_prompt_noise_curvature_px', 0.0),
-            'pre_refiner_noise_prob': getattr(config, 'pre_refiner_noise_prob', 0.0),
-            'pre_refiner_noise_normal_px': getattr(config, 'pre_refiner_noise_normal_px', 0.0),
-            'pre_refiner_noise_tangent_px': getattr(config, 'pre_refiner_noise_tangent_px', 0.0),
-            'pre_refiner_noise_curvature_px': getattr(config, 'pre_refiner_noise_curvature_px', 0.0)}
-
-
 def _nearest_anchor_idx_by_geometry(curves: torch.Tensor,
                                     anchor_table: torch.Tensor,
-                                    direct_point_regression: bool,
                                     num_points: int) -> torch.Tensor:
     curve_points = curve_vector_to_polyline(curves,
-                                            direct_point_regression=direct_point_regression,
                                             num_points=num_points).flatten(1)
     anchor_points = curve_vector_to_polyline(anchor_table,
-                                             direct_point_regression=direct_point_regression,
                                              num_points=num_points).flatten(1)
     dists = torch.cdist(curve_points, anchor_points, p=1)
     return dists.argmin(dim=-1)
@@ -127,7 +97,6 @@ def model_step(model,
     tokens = batch['tokens'].clone()
     curves = batch['curves'].clone()
     polylines = batch['polylines']
-    # shift the tokens to create targets
     ignore_idxs_tokens = torch.full((tokens.shape[0], 1, tokens.shape[2]),
                                     -1,
                                     dtype=tokens.dtype, device=tokens.device)
@@ -147,9 +116,7 @@ def model_step(model,
     num_token_targets = valid_tokens_mask.sum().clamp_min(1)
     num_curve_targets = valid_curves_mask.sum().clamp_min(1)
 
-    # precompute target class indices. Anchor supervision is handled by a
-    # dedicated anchor head and no longer overloads the token vocabulary.
-    target_cls_indices = target_tokens.argmax(dim=-1)  # [b, s]
+    target_cls_indices = target_tokens.argmax(dim=-1)
     regressor = model.nn['regressor']
     if regressor.num_anchors <= 1:
         raise RuntimeError('model_step expects multi-anchor training with anchor supervision enabled.')
@@ -157,31 +124,16 @@ def model_step(model,
     target_anchor_idx = None
     line_anchor_mask = valid_curves_mask & (target_cls_indices == 3)
     num_anchor_targets = line_anchor_mask.sum().clamp_min(1)
-    anchor_table = regressor.curve_anchors  # [num_anchors, curve_dim]
+    anchor_table = regressor.curve_anchors
     full_anchor_idx = torch.full_like(target_cls_indices, -1)
-    valid_gt = target_curves[line_anchor_mask]  # [M, curve_dim]
-    direct_point_regression = getattr(regressor, 'direct_point_regression', False)
+    valid_gt = target_curves[line_anchor_mask]
     baseline_num_points = getattr(regressor, 'num_baseline_points', DEFAULT_NUM_BASELINE_POINTS)
     nearest = _nearest_anchor_idx_by_geometry(valid_gt,
                                              anchor_table,
-                                             direct_point_regression,
                                              baseline_num_points)
     full_anchor_idx[line_anchor_mask] = nearest
     target_anchor_idx = full_anchor_idx
 
-    # our tokens already contain BOS/EOS tokens so we just run it
-    # through the model after replacing ignored indices.
-    if model.training and getattr(regressor, 'curve_prompt_noise_prob', 0.0) > 0.0:
-        prompt_line_mask = (tokens[..., 3] == 1) & (curves[..., 0] != -1)
-        curves = add_curve_noise(curves,
-                                 (batch['image'].shape[-1], batch['image'].shape[-2]),
-                                 direct_point_regression=direct_point_regression,
-                                 num_points=baseline_num_points,
-                                 mask=prompt_line_mask,
-                                 prob=getattr(regressor, 'curve_prompt_noise_prob', 0.0),
-                                 normal_px=getattr(regressor, 'curve_prompt_noise_normal_px', 0.0),
-                                 tangent_px=getattr(regressor, 'curve_prompt_noise_tangent_px', 0.0),
-                                 curvature_px=getattr(regressor, 'curve_prompt_noise_curvature_px', 0.0))
     tokens.masked_fill_(tokens == -1.0, 0)
     curves.masked_fill_(curves == -1.0, 0)
 
@@ -193,7 +145,6 @@ def model_step(model,
     num_iters = logits['curves'].shape[0]
     final_curve_loss = None
 
-    # valid targets (computed once)
     batch_target_cls = target_cls_indices[valid_tokens_mask]
     batch_target_curves = target_curves[valid_curves_mask]
     num_polyline_points = polylines.shape[-1] // 2
@@ -205,19 +156,13 @@ def model_step(model,
         pred_curves = pred_curves[valid_curves_mask]
 
         pred_points = curve_vector_to_polyline(pred_curves,
-                                               direct_point_regression=direct_point_regression,
                                                num_points=baseline_num_points)
         curve_points_loss = curve_criterion(pred_points, batch_target_polylines) / num_curve_targets
         curve_param_loss = curve_criterion(pred_curves, batch_target_curves) / num_curve_targets
-        if direct_point_regression:
-            curve_loss = curve_points_loss
-        else:
-            curve_loss = curve_points_loss + curve_param_loss
+        curve_loss = curve_points_loss + curve_param_loss
         curve_losses = curve_loss if curve_losses is None else curve_losses + curve_loss
         final_curve_loss = curve_loss
 
-    # Supervise all token classifier heads over the original BOS/EOS/LINE
-    # vocabulary. Anchor identity is handled by a separate anchor head.
     cls_loss = None
     for pred_tokens in logits['tokens']:
         pred_tokens = pred_tokens[valid_tokens_mask]
@@ -257,23 +202,18 @@ class OrliSegmentationDataModule(L.LightningDataModule):
         baseline_num_points = getattr(data_config,
                                       'baseline_num_points',
                                       DEFAULT_NUM_BASELINE_POINTS) or DEFAULT_NUM_BASELINE_POINTS
-        direct_point_regression = getattr(data_config,
-                                          'direct_point_regression',
-                                          False)
 
         if data_config.training_data and data_config.evaluation_data:
             self.train_set = BaselineSegmentationDataset(data_config.training_data,
                                                          im_transforms=im_transforms,
                                                          augmentation=data_config.augment,
                                                          baseline_num_points=baseline_num_points,
-                                                         direct_point_regression=direct_point_regression,
                                                          bos_token_id=self.bos_token_id,
                                                          eos_token_id=self.eos_token_id,
                                                          line_token_id=self.line_token_id)
             self.val_set = BaselineSegmentationDataset(data_config.evaluation_data,
                                                        im_transforms=im_transforms,
                                                        baseline_num_points=baseline_num_points,
-                                                       direct_point_regression=direct_point_regression,
                                                        bos_token_id=self.bos_token_id,
                                                        eos_token_id=self.eos_token_id,
                                                        line_token_id=self.line_token_id)
@@ -288,7 +228,6 @@ class OrliSegmentationDataModule(L.LightningDataModule):
             self.test_set = BaselineSegmentationDataset(data_config.test_data,
                                                         im_transforms=im_transforms,
                                                         baseline_num_points=baseline_num_points,
-                                                        direct_point_regression=direct_point_regression,
                                                         bos_token_id=self.bos_token_id,
                                                         eos_token_id=self.eos_token_id,
                                                         line_token_id=self.line_token_id)
@@ -536,10 +475,7 @@ class OrliSegmentationModel(L.LightningModule):
                                     match_threshold=self.test_match_threshold,
                                     num_baseline_points=getattr(self.net,
                                                                 'baseline_num_points',
-                                                                None),
-                                    direct_point_regression=getattr(self.net,
-                                                                    'direct_point_regression',
-                                                                    False))
+                                                                None))
             if eos_reached is not None and idx < eos_reached.numel():
                 metrics['truncated'] = bool(not eos_reached[idx].item())
             else:
@@ -558,8 +494,10 @@ class OrliSegmentationModel(L.LightningModule):
         if stage in [None, 'fit']:
             if self.net is None:
                 self.net = create_model('OrliModel',
-                                        **_orli_model_kwargs(self.hparams.config,
-                                                             self.trainer.datamodule.hparams.data_config.image_size))
+                                        model_variant=self.hparams.config.model_variant,
+                                        image_size=self.trainer.datamodule.hparams.data_config.image_size,
+                                        anchors=self.hparams.config.anchors,
+                                        baseline_num_points=self.hparams.config.baseline_num_points)
 
             if self.hparams.config.freeze_encoder:
                 for param in self.net.nn['encoder'].parameters():
@@ -585,7 +523,10 @@ class OrliSegmentationModel(L.LightningModule):
         data_config = checkpoint['datamodule_hyper_parameters']['data_config']
         cfg = checkpoint['_module_config']
         self.net = create_model('OrliModel',
-                                **_orli_model_kwargs(cfg, data_config.image_size))
+                                model_variant=cfg.model_variant,
+                                image_size=data_config.image_size,
+                                anchors=cfg.anchors,
+                                baseline_num_points=cfg.baseline_num_points)
 
     @classmethod
     def load_from_weights(cls,
@@ -604,14 +545,11 @@ class OrliSegmentationModel(L.LightningModule):
                 break
         if model is None:
             raise ValueError('No OrliModel found in weights file.')
-        model_config = model.user_metadata.get('config')
-        if not isinstance(model_config, dict):
-            raise ValueError('OrliModel weights do not contain a valid model configuration.')
         if config is None:
-            config = OrliSegmentationTrainingConfig(**model_config)
-        else:
-            for key, value in model_config.items():
-                setattr(config, key, value)
+            config = OrliSegmentationTrainingConfig()
+        config.model_variant = model.user_metadata['model_variant']
+        config.anchors = model.user_metadata['anchors']
+        config.baseline_num_points = model.user_metadata['baseline_num_points']
         return cls(config=config, model=model)
 
     def configure_callbacks(self):
@@ -624,36 +562,27 @@ class OrliSegmentationModel(L.LightningModule):
 
         return callbacks
 
-    # configuration of optimizers and learning rate schedulers
-    # --------------------------------------------------------
-    #
     # All schedulers are created internally with a frequency of step to enable
     # batch-wise learning rate warmup. In lr_scheduler_step() calls to the
     # scheduler are then only performed at the end of the epoch.
     def configure_optimizers(self):
-        # Selective learning rates: lower LR for pretrained encoder, full LR otherwise.
-        # Muon only works with 2D parameters (weight matrices). Everything else
-        # (biases, norms, embeddings, 1D params) must use AdamW.
+        # Muon handles 2D weight matrices; AdamW handles everything else.
         lr_map = {}
 
-        # Encoder (pretrained) - lower LR when unfrozen
         encoder_lr = self.hparams.config.lrate * 0.1
         for p in self.net.nn['encoder'].parameters():
             if p.requires_grad:
                 lr_map[id(p)] = encoder_lr
 
-        # Regressor - higher LR
         regressor_lr = self.hparams.config.lrate * 5.0
         for p in self.net.nn['regressor'].parameters():
             if p.requires_grad:
                 lr_map[id(p)] = regressor_lr
 
-        # Everything else (decoder + neck) - full LR
         for p in self.net.parameters():
             if p.requires_grad and id(p) not in lr_map:
                 lr_map[id(p)] = self.hparams.config.lrate
 
-        # Split into Muon (2D) and AdamW (non-2D) param groups, keyed by lr
         muon_by_lr = {}
         adam_by_lr = {}
         for p in self.net.parameters():
@@ -678,7 +607,6 @@ class OrliSegmentationModel(L.LightningModule):
                         'betas': (0.9, 0.999)},
         )
 
-        # Configure learning rate scheduler
         len_train_set = len(self.trainer.datamodule.train_set)
         batch_size = self.trainer.datamodule.hparams.data_config.batch_size
         accumulate = self.hparams.config.accumulate_grad_batches
@@ -729,11 +657,8 @@ class OrliSegmentationModel(L.LightningModule):
         }
 
     def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure):
-        # update params
         optimizer.step(closure=optimizer_closure)
 
-        # linear warmup between 0 and the initial learning rate in `warmup` steps.
-        # Each param group has its own target lr (encoder has lower lr).
         if self.hparams.config.warmup and self.trainer.global_step < self.hparams.config.warmup:
             lr_scale = min(1.0, float(self.trainer.global_step + 1) / self.hparams.config.warmup)
             for pg in optimizer.param_groups:

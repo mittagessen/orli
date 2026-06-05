@@ -1,49 +1,104 @@
 # Orli
 
-Orli (**o**rdered **r**egression of **li**nes) is a layout analysis method
-performing the text line detection and reading order determination subtasks
-jointly.
+Orli (**o**rdered **r**egression of **li**nes) is a layout-analysis model that
+detects text-line baselines and emits them directly in reading order. It is
+designed for historical-document OCR pipelines that need explicit line geometry
+without a separate reading-order heuristic.
 
-Orli consists of a ConvNeXtV2 vision encoder, an adapter module projecting
-multi-scale feature maps into a shared embedding space, and a transformer
-decoder with cross-attention. The autoregressive decoder predicts baselines by
-regressing local-frame baseline vectors through iterative refinement. Training
-targets are fixed-size, arc-length-resampled baseline polylines; the regressed
-vector stores the baseline center, length, orientation, and normal offsets for
-the sampled points.
+The method is described in the article
+[End-to-End Text Line Detection and Ordering](https://arxiv.org/abs/2606.04166).
 
 ## Installation
 
 ```bash
-$ pip install .
+pip install .
 ```
+
+Orli integrates with kraken 7 through its model plugin system.
+
+## Model
+
+The release base model is trained on 200000 pages spanning ten writing systems.
+It is published available through HTRMoPo with DOI
+[10.5281/zenodo.20558179](https://doi.org/10.5281/zenodo.20558179).
+
+Download it with kraken:
+
+```bash
+kraken get 10.5281/zenodo.20558179
+```
+
+The command prints the model directory and the downloaded model file, necessary
+for fine-tuning and programmatic inference.
+
+Run baseline segmentation with kraken. This example writes PAGE XML:
+
+```bash
+kraken -i input.jpg output.xml -x segment -bl --model orli_base.safetensors
+```
+
+Programmatic inference uses the complete model path printed after download:
+
+```python
+from PIL import Image
+from orli.pred import segment
+
+im = Image.open("input.jpg")
+segmentation = segment(im, "/path/to/kraken/download/orli_base.safetensors")
+```
+
+## Scores
+
+Line metrics are computed using the cBAD evaluation score implemented in `orli
+test`. Footrule is normalized Spearman footrule, where lower is better.
+
+### Test Set
+
+| Model | Precision | Recall | F1 | Cov. | Footrule | Kendall tau |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| base | 0.9554 | 0.9564 | 0.9559 | 0.9667 | 0.0304 | 0.9649 |
+
+### cBAD 2019
+
+| Model | Precision | Recall | F1 | Cov. | Footrule | Kendall tau |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| base | 0.9378 | 0.9302 | 0.9340 | 0.9406 | 0.0768 | 0.9113 |
+| fine-tuned | 0.9395 | 0.9306 | 0.9351 | 0.9421 | 0.0720 | 0.9165 |
+
+### Reading-Order Benchmarks
+
+| Dataset | Model | Precision | Recall | F1 | Cov. | Footrule | Kendall tau |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| OHG | base | 0.9940 | 0.9937 | 0.9938 | 0.9993 | 0.0033 | 0.9967 |
+| FCR | base | 0.9894 | 0.9874 | 0.9884 | 0.9905 | 0.0028 | 0.9971 |
+| ABP | base | 0.8505 | 0.7919 | 0.8201 | 0.8071 | 0.5372 | 0.2878 |
+| ABP | fine-tuned | 0.8498 | 0.7806 | 0.8137 | 0.7931 | 0.0898 | 0.8972 |
 
 ## Dataset Preparation
 
-Orli needs to be trained on datasets precompiled from PageXML or ALTO files.
-The compiler stores each line as a normalized baseline `polyline` in source-file
-order; the training loader resamples those polylines for the configured baseline
-point count.
+Orli trains on Arrow datasets compiled from PageXML or ALTO files. The compiler
+stores each line as a normalized baseline polyline in source-file order. The
+arrow files are *NOT* compatible with kraken's compiled datasets.
 
 ```bash
-$ orli compile -o dataset.arrow --allow-textless *.xml
+orli compile -o dataset.arrow --allow-textless *.xml
 ```
 
-If you have recent GPUs or the input images are very large, the training is
-probably I/O-bound. In that case it can help to resize the images in the
-dataset to the input size of the network. For the default (1280, 960):
+For large images, pre-resizing during compilation reduces training I/O. The
+base model uses a high-resolution input size of 1920x1440:
 
 ```bash
-$ orli compile -o dataset.arrow --allow-textless -r 1280 960 *.xml
+orli compile -o dataset.arrow --allow-textless -r 1920 1440 *.xml
 ```
 
-The compilation **always** uses the implicit reading order, i.e., the sequence
-of line elements in the source files. If other reading orders are defined they
-will be ignored.
+Compilation uses the implicit reading order, i.e. the sequence of line elements
+in the source file. Other reading-order annotations are ignored.
 
-## Training and Fine-tuning
+## Training and Fine-Tuning
 
-Training can be configured using the command line or experiment YAML files (preferred):
+Training and fine-tuning are configured either through command-line options or a
+YAML file. For fine-tuning the released base model, keep the high-resolution
+input size and load the downloaded `orli_base.safetensors` file:
 
 ```yaml
 precision: bf16-mixed
@@ -52,68 +107,58 @@ num_workers: 12
 num_threads: 1
 train:
   training_data:
-    - orli_train.lst
+    - train.arrow
   evaluation_data:
-    - orli_val.lst
-  checkpoint_path: experiments/base_orli
-  image_size: [1280, 960]
+    - val.arrow
+  checkpoint_path: experiments/orli_finetuned
+  image_size: [1920, 1440]
   optimizer: AdamW
-  epochs: 16
-  lrate: 1e-4
+  epochs: 8
+  lrate: 5e-5
   weight_decay: 1e-4
   schedule: cosine
-  cos_t_max: 16
+  cos_t_max: 8
   cos_min_lr: 1e-5
-  warmup: 2000
+  warmup: 1000
   augment: true
   batch_size: 8
-  val_batch_size: 16
+  val_batch_size: 8
   accumulate_grad_batches: 8
   baseline_num_points: 16
 ```
 
-Train the model:
-
 ```bash
-$ orli --config experiment.yaml train
+orli --config finetune.yaml train --load "$MODEL"
+orli --config finetune.yaml train --resume /path/to/checkpoint.ckpt
 ```
 
-Resume training from a checkpoint:
+The training command writes the best checkpoint and converts it to safetensors
+automatically. The resulting `best_*.safetensors` file can be used with
+`kraken segment` in the same way as the base model.
+
+## Evaluation
+
+Evaluate a model on an Arrow dataset with baseline detection metrics and
+reading-order metrics:
 
 ```bash
-$ orli --config experiment.yaml train --resume /path/to/checkpoint.ckpt
+orli test --load model.safetensors test.arrow
 ```
 
-Fine-tune from an existing model:
+## Citation
 
-```bash
-$ orli --config experiment.yaml train --load /path/to/model.safetensors
+```bibtex
+@misc{kiessling2026orli,
+  title = {End-to-End Text Line Detection and Ordering},
+  author = {Benjamin Kiessling},
+  year = {2026},
+  eprint = {2606.04166},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.CV},
+  url = {https://arxiv.org/abs/2606.04166}
+}
 ```
 
-### Checkpoint Conversion
+## License
 
-Checkpoints need to be converted into safetensors format before being usable
-for inference and testing:
-
-```bash
-$ ketos convert -o model.safetensors checkpoint.ckpt
-```
-
-## Inference
-
-Inference is implemented through the plugin system in kraken (>= 7):
-
-```bash
-$ kraken -i input.jpg output.xml -a segment -bl -i model.safetensors
-```
-
-## Testing
-
-Evaluate a model on an arrow test dataset, computing baseline detection metrics
-inspired by the
-[TranskribusEvaluationScheme](https://github.com/Transkribus/TranskribusBaseLineEvaluationScheme)
-and reading order metrics (Spearman footrule, Kendall tau):
-
-```bash
-$ orli test --load model.safetensors test.arrow
-```
+Orli is released under the Apache License 2.0.

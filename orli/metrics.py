@@ -27,9 +27,7 @@ import logging
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import kendalltau
 
-from orli.modules.baseline import (LOCAL_BASELINE_PARAM_DIM,
-                                   baseline_polyline_dim,
-                                   local_params_to_polyline)
+from orli.modules.baseline import LOCAL_BASELINE_PARAM_DIM, local_params_to_polyline
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +215,6 @@ def compute_ordering_metrics(matches: list[tuple[int, int]],
         Dict with 'spearman_footrule', 'kendall_tau',
         'num_matched_for_ordering'.
     """
-    # Filter to well-matched pairs
     good = [(p, g) for (p, g), s in zip(matches, match_scores)
             if s.item() >= match_threshold]
 
@@ -226,12 +223,9 @@ def compute_ordering_metrics(matches: list[tuple[int, int]],
                 'kendall_tau': float('nan'),
                 'num_matched_for_ordering': len(good)}
 
-    # Sort by GT index and re-rank both to 0..n-1
     good.sort(key=lambda x: x[1])
     gt_ranks = list(range(len(good)))
-    # Pred indices in the order sorted by GT
     pred_indices = [p for p, _ in good]
-    # Convert to ranks (rank of each pred_index in sorted order)
     pred_rank_order = sorted(range(len(pred_indices)), key=lambda i: pred_indices[i])
     pred_ranks = [0] * len(pred_indices)
     for rank, idx in enumerate(pred_rank_order):
@@ -239,12 +233,10 @@ def compute_ordering_metrics(matches: list[tuple[int, int]],
 
     n = len(gt_ranks)
 
-    # Spearman's footrule: sum |pred_rank[i] - gt_rank[i]| / max_displacement
     footrule = sum(abs(pred_ranks[i] - gt_ranks[i]) for i in range(n))
-    max_footrule = n * n // 2  # floor(n^2/2)
+    max_footrule = n * n // 2
     norm_footrule = footrule / max_footrule if max_footrule > 0 else 0.0
 
-    # Kendall's tau
     tau, _ = kendalltau(pred_ranks, gt_ranks)
 
     return {'spearman_footrule': norm_footrule,
@@ -296,8 +288,7 @@ def evaluate_page(pred_curves: torch.Tensor,
                   tol: float,
                   match_threshold: float = 0.5,
                   spacing: float = 5.0,
-                  num_baseline_points: int | None = None,
-                  direct_point_regression: bool = False) -> dict[str, float]:
+                  num_baseline_points: int | None = None) -> dict[str, float]:
     """
     Full per-page evaluation.
 
@@ -310,29 +301,15 @@ def evaluate_page(pred_curves: torch.Tensor,
         tol: Tolerance in pixels.
         match_threshold: Minimum score for ordering evaluation.
         spacing: Polyline interpolation spacing.
-        num_baseline_points: Fixed baseline point count. Required to
-                             disambiguate direct point vectors from long
-                             local-frame vectors.
-        direct_point_regression: Interpret predicted curves as direct fixed
-                                 point vectors when inferring point count.
+        num_baseline_points: Fixed baseline point count.
 
     Returns:
         Combined dict of detection and ordering metrics.
     """
     if num_baseline_points is None and pred_curves.shape[-1] > LOCAL_BASELINE_PARAM_DIM:
-        if direct_point_regression:
-            if pred_curves.shape[-1] % 2 != 0:
-                raise ValueError(f'Expected an even direct point vector width, got {pred_curves.shape[-1]}.')
-            num_baseline_points = pred_curves.shape[-1] // 2
-        else:
-            num_baseline_points = pred_curves.shape[-1] - LOCAL_BASELINE_PARAM_DIM
+        num_baseline_points = pred_curves.shape[-1] - LOCAL_BASELINE_PARAM_DIM
     elif num_baseline_points is not None:
         num_baseline_points = int(num_baseline_points)
-
-    if direct_point_regression and num_baseline_points is not None:
-        expected = baseline_polyline_dim(num_baseline_points)
-        if pred_curves.numel() and pred_curves.shape[-1] != expected:
-            raise ValueError(f'Expected direct point curve dim {expected}, got {pred_curves.shape[-1]}.')
 
     pred_polylines = _baseline_vectors_to_polylines(pred_curves,
                                                     image_size,
@@ -384,18 +361,14 @@ def aggregate_metrics(page_metrics: list[dict[str, float]]) -> dict[str, float]:
     avg_num_pred = sum(m['num_pred'] for m in page_metrics) / n
     avg_num_gt = sum(m['num_gt'] for m in page_metrics) / n
 
-    # Ordering: skip NaN pages
     footrule_vals = [m['spearman_footrule'] for m in page_metrics
-                     if m['spearman_footrule'] == m['spearman_footrule']]  # NaN != NaN
+                     if m['spearman_footrule'] == m['spearman_footrule']]
     tau_vals = [m['kendall_tau'] for m in page_metrics
                 if m['kendall_tau'] == m['kendall_tau']]
 
     spearman_footrule = sum(footrule_vals) / len(footrule_vals) if footrule_vals else float('nan')
     kendall_tau_val = sum(tau_vals) / len(tau_vals) if tau_vals else float('nan')
 
-    # Matched-line coverage: ratio of pairs surviving the score threshold to
-    # the GT / pred line counts. Indicates how much of the page the τ and
-    # footrule numbers actually describe.
     gt_cov_vals = [m['num_matched_for_ordering'] / m['num_gt']
                    for m in page_metrics if m.get('num_gt')]
     pred_cov_vals = [m['num_matched_for_ordering'] / m['num_pred']

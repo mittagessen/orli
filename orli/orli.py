@@ -22,7 +22,7 @@ import torch.nn.functional as F
 
 from torch import nn
 from lightning.fabric import Fabric
-from typing import Optional, Any, Union
+from typing import Optional, Union
 from collections.abc import Generator
 
 from orli.configs import OrliSegmentationInferenceConfig, MODEL_VARIANTS
@@ -57,91 +57,32 @@ class OrliModel(nn.Module, SegmentationBaseModel):
     def __init__(self, **kwargs):
         super().__init__()
 
-        if (config := kwargs.get('config', None)) is None:
-            raise ValueError('config argument is missing in args.')
-        if hasattr(config, '__dict__'):
-            config = {'anchors': config.anchors,
-                      'model_variant': config.model_variant,
-                      'baseline_num_points': getattr(config,
-                                                     'baseline_num_points',
-                                                     DEFAULT_NUM_BASELINE_POINTS),
-                      'curve_fourier_features': getattr(config,
-                                                        'curve_fourier_features',
-                                                        True),
-                      'anchor_embedding': getattr(config,
-                                                  'anchor_embedding',
-                                                  True),
-                      'line_refiner': getattr(config,
-                                              'line_refiner',
-                                              False),
-                      'direct_point_regression': getattr(config,
-                                                         'direct_point_regression',
-                                                         False),
-                      'curve_prompt_noise_prob': getattr(config,
-                                                         'curve_prompt_noise_prob',
-                                                         0.0),
-                      'curve_prompt_noise_normal_px': getattr(config,
-                                                              'curve_prompt_noise_normal_px',
-                                                              0.0),
-                      'curve_prompt_noise_tangent_px': getattr(config,
-                                                               'curve_prompt_noise_tangent_px',
-                                                               0.0),
-                      'curve_prompt_noise_curvature_px': getattr(config,
-                                                                 'curve_prompt_noise_curvature_px',
-                                                                 0.0),
-                      'pre_refiner_noise_prob': getattr(config,
-                                                        'pre_refiner_noise_prob',
-                                                        0.0),
-                      'pre_refiner_noise_normal_px': getattr(config,
-                                                             'pre_refiner_noise_normal_px',
-                                                             0.0),
-                      'pre_refiner_noise_tangent_px': getattr(config,
-                                                              'pre_refiner_noise_tangent_px',
-                                                              0.0),
-                      'pre_refiner_noise_curvature_px': getattr(config,
-                                                                'pre_refiner_noise_curvature_px',
-                                                                0.0)}
-        config = dict(config)
-        config.pop('soft_anchors', None)
-        if config.get('baseline_num_points') is None:
-            config['baseline_num_points'] = DEFAULT_NUM_BASELINE_POINTS
-        if config.get('curve_fourier_features') is None:
-            config['curve_fourier_features'] = True
-        if config.get('anchor_embedding') is None:
-            config['anchor_embedding'] = True
-        if config.get('line_refiner') is None:
-            config['line_refiner'] = False
-        if config.get('direct_point_regression') is None:
-            config['direct_point_regression'] = False
-        for key in ('curve_prompt_noise_prob',
-                    'curve_prompt_noise_normal_px',
-                    'curve_prompt_noise_tangent_px',
-                    'curve_prompt_noise_curvature_px',
-                    'pre_refiner_noise_prob',
-                    'pre_refiner_noise_normal_px',
-                    'pre_refiner_noise_tangent_px',
-                    'pre_refiner_noise_curvature_px'):
-            if config.get(key) is None:
-                config[key] = 0.0
+        if (legacy_config := kwargs.pop('config', None)) is not None:
+            if hasattr(legacy_config, '__dict__'):
+                legacy_config = vars(legacy_config)
+            for key in ('anchors', 'model_variant', 'baseline_num_points'):
+                if key in legacy_config and key not in kwargs:
+                    kwargs[key] = legacy_config[key]
 
-        model_variant = config.get('model_variant', 'tiny')
+        if (model_variant := kwargs.get('model_variant', None)) is None:
+            raise ValueError('model_variant argument is missing in args.')
+        if (anchors := kwargs.get('anchors', None)) is None:
+            raise ValueError('anchors argument is missing in args.')
         if model_variant not in MODEL_VARIANTS:
             choices = ', '.join(MODEL_VARIANTS)
             raise ValueError(f'Unknown model_variant {model_variant!r}. Choices: {choices}')
-        metadata = dict(kwargs)
-        metadata['config'] = config
-        kwargs = {**kwargs, **config, **MODEL_VARIANTS[model_variant]}
 
         if (image_size := kwargs.get('image_size', None)) is None:
             raise ValueError('image_size argument is missing in args.')
 
-        if (anchors := config.get('anchors', None)) is None:
-            raise ValueError('anchors argument is missing in config.')
-        self.baseline_num_points = int(config.get('baseline_num_points',
-                                                  DEFAULT_NUM_BASELINE_POINTS))
-        self.direct_point_regression = bool(config.get('direct_point_regression', False))
-        self.baseline_dim = curve_vector_dim(self.baseline_num_points,
-                                             self.direct_point_regression)
+        self.baseline_num_points = int(kwargs.get('baseline_num_points',
+                                                  DEFAULT_NUM_BASELINE_POINTS) or DEFAULT_NUM_BASELINE_POINTS)
+        kwargs['baseline_num_points'] = self.baseline_num_points
+        self.baseline_dim = curve_vector_dim(self.baseline_num_points)
+        self.user_metadata.update({'accuracy': [], 'metrics': []})
+        self.user_metadata.update(kwargs)
+
+        kwargs = {**kwargs, **MODEL_VARIANTS[model_variant]}
 
         encoder_name = kwargs['encoder_name']
         encoder_idxs = list(kwargs['encoder_idxs'])
@@ -154,11 +95,6 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         neck_ffn_dim = kwargs['neck_ffn_dim']
         neck_dropout = kwargs['neck_dropout']
         neck_fusion_depth = kwargs['neck_fusion_depth']
-
-        self.user_metadata: dict[str, Any] = {'model_type': self.model_type,
-                                               'accuracy': [],
-                                               'metrics': []}
-        self.user_metadata.update(metadata)
 
         logger.info('Creating segmentation model')
 
@@ -185,26 +121,11 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                                  fusion_depth=neck_fusion_depth)
 
         decoder_model = baseline_decoder(vocab_size=4 + self.baseline_dim,
-                                         encoder_sizes=adapter.output_sizes,
-                                         curve_num_freqs=4 if config.get('curve_fourier_features', True) else 0)
+                                         encoder_sizes=adapter.output_sizes)
 
         curve_reg = CurveRegressionHead(embed_dim=decoder_model.tok_embeddings.embed_dim,
                                         num_iterations=len(decoder_model.output_hidden_states) + 1,
                                         num_baseline_points=self.baseline_num_points,
-                                        direct_point_regression=self.direct_point_regression,
-                                        anchor_embedding=config.get('anchor_embedding', True),
-                                        line_refiner=config.get('line_refiner', False),
-                                        image_size=(image_size[1], image_size[0]),
-                                        curve_prompt_noise_prob=config.get('curve_prompt_noise_prob', 0.0),
-                                        curve_prompt_noise_normal_px=config.get('curve_prompt_noise_normal_px', 0.0),
-                                        curve_prompt_noise_tangent_px=config.get('curve_prompt_noise_tangent_px', 0.0),
-                                        curve_prompt_noise_curvature_px=config.get('curve_prompt_noise_curvature_px',
-                                                                                   0.0),
-                                        pre_refiner_noise_prob=config.get('pre_refiner_noise_prob', 0.0),
-                                        pre_refiner_noise_normal_px=config.get('pre_refiner_noise_normal_px', 0.0),
-                                        pre_refiner_noise_tangent_px=config.get('pre_refiner_noise_tangent_px', 0.0),
-                                        pre_refiner_noise_curvature_px=config.get('pre_refiner_noise_curvature_px',
-                                                                                  0.0),
                                         anchors=anchors)
 
         self.nn = nn.ModuleDict({'encoder': encoder_model,
@@ -213,14 +134,6 @@ class OrliModel(nn.Module, SegmentationBaseModel):
                                  'regressor': curve_reg})
 
         self.ready_for_generation = False
-
-    @property
-    def user_metadata(self) -> dict[str, Any]:
-        return self._user_metadata
-
-    @user_metadata.setter
-    def user_metadata(self, val: dict[str, Any]) -> None:
-        self._user_metadata = val
 
     def setup_caches(self,
                      batch_size: int,
@@ -319,9 +232,6 @@ class OrliModel(nn.Module, SegmentationBaseModel):
             - d_e: encoder embed dim
             - m_s: max seq len
         """
-        # During decoding, encoder_input will only be provided
-        # for new inputs. Previous encoder outputs are cached
-        # in the decoder cache.
         if encoder_input is not None:
             encoder_hidden_states = self.forward_encoder_embeddings(encoder_input)
 
@@ -377,7 +287,6 @@ class OrliModel(nn.Module, SegmentationBaseModel):
 
         self._resize_generation_state(config.batch_size)
 
-        # generate a regular causal mask
         self._masks = self._fabric.to_device(torch.tril(torch.ones(max_predicted_lines,
                                                                    max_predicted_lines,
                                                                    dtype=torch.bool).unsqueeze(0)))
@@ -415,7 +324,6 @@ class OrliModel(nn.Module, SegmentationBaseModel):
         curves = curves[non_empty]
 
         sampled = curve_vector_to_polyline(curves,
-                                           direct_point_regression=self.direct_point_regression,
                                            num_points=self.baseline_num_points).clamp(0.0, 1.0)
         if sampled.numel():
             scale = torch.tensor((im.width, im.height),
@@ -475,13 +383,11 @@ class OrliModel(nn.Module, SegmentationBaseModel):
 
         eos_token = torch.tensor(self.eos_id, device=encoder_hidden_states.device, dtype=torch.long)
 
-        # Mask is shape (batch_size, max_seq_len, image_embedding_len)
         encoder_mask = torch.ones((encoder_hidden_states.size(0),
                                    1,
                                    encoder_hidden_states.size(1)),
                                   dtype=torch.bool,
                                   device=encoder_input.device)
-        # prefill step
         curr_masks = self._masks[:, :1]
         logits = self.forward(tokens=self._prompt,
                               encoder_hidden_states=encoder_hidden_states,
@@ -496,21 +402,17 @@ class OrliModel(nn.Module, SegmentationBaseModel):
 
         curr_pos = 1
 
-        # keeps track of EOS tokens emitted by each sequence in a batch
         eos_token_reached = torch.zeros(self._batch_size, dtype=torch.bool, device=encoder_input.device)
         eos_token_reached |= tokens[:, -1] == eos_token
 
-        # mask used for setting all values from EOS token to pad_id in output sequences.
         eos_token_mask = torch.ones(self._batch_size, 0, dtype=torch.int32, device=curves.device)
 
         for _ in range(getattr(self._inf_config, 'max_predicted_lines', 768) - 1):
-            # update eos_token_mask if an EOS token was emitted in a previous step
             eos_token_mask = torch.cat([eos_token_mask, ~eos_token_reached.reshape(self._batch_size, 1)], dim=-1)
 
             curr_input_pos = self._input_pos[:, curr_pos]
             curr_masks = self._masks[:, curr_pos, None, :]
 
-            # no need for encoder embeddings anymore as they're in the cache now
             input_tok = F.one_hot(tokens.squeeze(-1), num_classes=4).to(device=encoder_hidden_states.device)
             logits = self.forward(tokens=torch.cat([input_tok.unsqueeze(1),
                                                     curves.unsqueeze(1)], dim=-1),
