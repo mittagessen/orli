@@ -34,8 +34,11 @@ for fine-tuning and programmatic inference.
 Run baseline segmentation with kraken. This example writes PAGE XML:
 
 ```bash
-kraken -i input.jpg output.xml -x segment -bl --model orli_base.safetensors
+kraken --precision bf16-mixed -i input.jpg output.xml -x segment -bl --model orli_base.safetensors
 ```
+
+The base model *only* works in bfloat16 precision! Other precisions are likely
+to cause runaway generation.
 
 Programmatic inference uses the complete model path printed after download:
 
